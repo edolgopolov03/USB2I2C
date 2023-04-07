@@ -1,0 +1,1763 @@
+C51 COMPILER V9.50a   USB_MAIN                                                             04/03/2023 15:54:11 PAGE 1   
+
+
+C51 COMPILER V9.50a, COMPILATION OF MODULE USB_MAIN
+OBJECT MODULE PLACED IN USB_Main.OBJ
+COMPILER INVOKED BY: C:\Keil\C51\BIN\C51.exe USB_Main.c DB OE CD INCDIR(c:\SiLabs\MCU\Inc) COMPACT
+
+line level    source
+
+   1          //-----------------------------------------------------------------------------
+   2          // USB_Main.c
+   3          //-----------------------------------------------------------------------------
+   4          // Copyright 2005 Silicon Laboratories, Inc.
+   5          // http://www.silabs.com
+   6          //
+   7          // Program Description:
+   8          //
+   9          // This application note covers the implementation of a simple USB application 
+  10          // using the interrupt transfer type. This includes support for device
+  11          // enumeration, control and interrupt transactions, and definitions of 
+  12          // descriptor data. The purpose of this software is to give a simple working 
+  13          // example of an interrupt transfer application; it does not include
+  14          // support for multiple configurations or other transfer types.
+  15          //
+  16          // How To Test:         See Readme.txt
+  17          //
+  18          //
+  19          // FID:                         32X000024
+  20          // Target:                      C8051F32x
+  21          // Tool chain:          Keil C51 7.50 / Keil EVAL C51
+  22          //                                      Silicon Laboratories IDE version 2.6
+  23          // Command Line:         See Readme.txt
+  24          // Project Name:         F32x_USB_Interrupt
+  25          //
+  26          //
+  27          // Release 1.3
+  28          //              -All changes by GP
+  29          //              -22 NOV 2005
+  30          //              -Changed revision number to match project revision
+  31          //              No content changes to this file
+  32          //              -Modified file to fit new formatting guidelines
+  33          //              -Changed file name from USB_MAIN.c
+  34          
+  35          // Release 1.1
+  36          //              -All changes by DM
+  37          //              -22 NOV 2002
+  38          //              -Added support for switches and sample USB interrupt application.
+  39          //
+  40          // Release 1.0
+  41          //              -Initial Revision (JS)
+  42          //              -22 FEB 2002
+  43          //
+  44          
+  45          //-----------------------------------------------------------------------------
+  46          // Includes
+  47          //-----------------------------------------------------------------------------
+  48          
+  49          #include <stdio.h>
+  50          #include <intrins.h>
+  51          #include "USB_CDC_Type.h"
+  52          #include "USB_Register.h"
+  53          #include "USB_Main.h"
+  54          #include "USB_Descriptor.h"
+  55          #include "USB_Standard_Requests.h"
+C51 COMPILER V9.50a   USB_MAIN                                                             04/03/2023 15:54:11 PAGE 2   
+
+  56          #include "USB_CDC_UART.h"
+  57          #include "uart.h"
+  58          #include "extsram.h"
+  59          #include "spi.h"
+  60          
+  61          
+  62          //-----------------------------------------------------------------------------
+  63          // 16-bit SFR Definitions for 'F32x
+  64          //-----------------------------------------------------------------------------
+  65          
+  66          #if defined KEIL
+  67          
+  68          
+  69          #endif // KEIL
+  70          
+  71          //-----------------------------------------------------------------------------
+  72          // Globals
+  73          //-----------------------------------------------------------------------------
+  74          
+  75          xdata unsigned char buf [10];
+  76          unsigned char timer = 0;
+  77          int timeout = 300; // ms
+  78          
+  79          //-----------------------------------------------------------------------------
+  80          // Local Prototypes
+  81          //-----------------------------------------------------------------------------
+  82          
+  83          // Initialization Routines
+  84          void Sysclk_Init(void);                                 // Initialize the system clock
+  85          void Port_Init(void);                                   // Configure ports
+  86          void Usb0_Init(void);                                   // Configure USB for Full speed
+  87          void Timer_Init(void);                                  // Timer 2 for use by ADC and swtiches
+  88          void Adc_Init(void);                                    // Configure ADC for continuous
+  89                                                                                          // conversion low-power mode
+  90          
+  91          // Other Routines
+  92          void Delay(void);                                               // About 80 us/1 ms on Full Speed
+  93          
+  94          //-----------------------------------------------------------------------------
+  95          // _getkey
+  96          //-----------------------------------------------------------------------------
+  97          //
+  98          // SFR Paged version of _getkey
+  99          //
+ 100          char _getkey (void)  {
+ 101   1      
+ 102   1         char c = '0';
+ 103   1         do
+ 104   1         {            
+ 105   2                      Handle_In2();                                   // Poll IN/OUT EP2 and handle transaction
+ 106   2                      Handle_Out2();
+ 107   2              } while(!RXReady||!TXReady);
+ 108   1         c = COMGetByte();
+ 109   1         return c;
+ 110   1      }
+ 111          //-----------------------------------------------------------------------------
+ 112          // putchar
+ 113          //-----------------------------------------------------------------------------
+ 114          //
+ 115          // SFR Paged version of putchar
+ 116          //
+ 117          char putchar (char c)  {
+C51 COMPILER V9.50a   USB_MAIN                                                             04/03/2023 15:54:11 PAGE 3   
+
+ 118   1      
+ 119   1         // output CR  
+ 120   1         if (c == '\n')  {
+ 121   2            while (TXReady);
+ 122   2            COMPutByte(0x0d);
+ 123   2         }
+ 124   1         
+ 125   1         // output character
+ 126   1         while (TXReady);
+ 127   1         COMPutByte(c);   
+ 128   1         
+ 129   1         return (c);
+ 130   1      }
+ 131          
+ 132          void showhelp(void)
+ 133          {
+ 134   1              printf("HELP\n");
+ 135   1      }
+ 136          
+ 137          int checkbit(const int value, const int position) {
+ 138   1          int result;
+ 139   1          if ((value & (1 << position)) == 0) {
+ 140   2              result = 0;
+ 141   2          } else {
+ 142   2              result = 1;
+ 143   2          }
+ 144   1          return result;
+ 145   1      }
+ 146          
+ 147          void Make_volkov_package(unsigned char nch, unsigned char adr, int N)
+ 148          {
+ 149   1              unsigned char xSum = (unsigned char) 0;
+ 150   1              int i = 0;
+ 151   1              extmas[N_UART] = nch;
+ 152   1              extmas[NUM_SEND] = N+4;
+ 153   1              extmas[TYPE_COM] = 1;
+ 154   1              extmas[OUT_PACKAGE] = 0xAA; // SendStart
+ 155   1              extmas[OUT_PACKAGE + 1] = adr;  // Send Adress of Device
+ 156   1              xSum = adr;
+ 157   1              for (i = 0; i<N; i++)
+ 158   1              {
+ 159   2                      if (buf[i]!=0xAA & buf[i]!=0xAB & buf[i]!=0xAC)
+ 160   2                      {
+ 161   3                              extmas[OUT_PACKAGE + 2 + i] = buf[i]; //Send Package if it's not START STOP or SHIFT
+ 162   3                      } else
+ 163   2                      {
+ 164   3                              extmas[OUT_PACKAGE + 2 + i] = 0xAC;
+ 165   3                              extmas[OUT_PACKAGE + 2 + i] = buf[i] - 0xAC;
+ 166   3                      }
+ 167   2                      xSum = xSum^buf[i];
+ 168   2              }
+ 169   1              extmas[OUT_PACKAGE + 2 + N] = xSum;
+ 170   1              extmas[OUT_PACKAGE + 2 + N + 1] = 0xAB;
+ 171   1      }
+ 172          
+ 173          //-----------------------------------------------------------------------------
+ 174          // Main Routine
+ 175          //-----------------------------------------------------------------------------
+ 176          void main(void)
+ 177          {
+ 178   1      //      BYTE Count;
+ 179   1              BYTE dt;
+C51 COMPILER V9.50a   USB_MAIN                                                             04/03/2023 15:54:11 PAGE 4   
+
+ 180   1              int num;
+ 181   1              long Nstep;
+ 182   1              BYTE line_state;
+ 183   1              BYTE abd = 0xFF;
+ 184   1              int i = 0, t;
+ 185   1      
+ 186   1      #if defined KEIL
+ 187   1      
+ 188   1              PCA0MD &= ~0x40;                                        // Disable Watchdog timer temporarily
+ 189   1      
+ 190   1      #endif // KEIL
+ 191   1      
+ 192   1              Sysclk_Init();                                          // Initialize oscillator
+ 193   1              Port_Init();                                            // Initialize crossbar and GPIO
+ 194   1              init_exram();
+ 195   1              Usb0_Init();                                            // Initialize USB0
+ 196   1              Timer_Init();                                           // Initialize timer2
+ 197   1              UART0_Init(BAUDRATE);                           // Initialize UART0
+ 198   1              UART1_Init(BAUDRATE);                           // Initialize UART1
+ 199   1              INT0_Init();
+ 200   1              SPI_Init();
+ 201   1              Flush_COMbuffers();                                     // Initialize COM ring buffer
+ 202   1      
+ 203   1      //      EIE1    |= 0x0A;                                        // Enable conversion complete interrupt and US0
+ 204   1              EIE1    |= 0x02;                                        // Enable USB0 interrupt
+ 205   1              IE              |= 0xA0;                                        // Enable Timer2 and Global Interrupt enable
+ 206   1      
+ 207   1              printf("Test RS-485\n");
+ 208   1              while (1)
+ 209   1              {
+ 210   2                      if (i_flag) 
+ 211   2                      {
+ 212   3                              printf("Interrupt\n\r");
+ 213   3                              i_flag = 0;
+ 214   3                      }
+ 215   2                      if (end_int == 1)
+ 216   2                      {
+ 217   3                              SPI_MasterSend(0x00, 0x00);
+ 218   3                              printf("Interrupt was proccesed\n\r");
+ 219   3                              end_int = 0;
+ 220   3                              //IE0 = 1;
+ 221   3                      }
+ 222   2                      Handle_In2();                                   // Poll IN/OUT EP2 and handle transaction
+ 223   2                      Handle_Out2();
+ 224   2                      while (TXReady && RXReady)              // loop back TX to RX
+ 225   2                      {
+ 226   3                              dt = COMGetByte();
+ 227   3                              printf("%c\n", dt);
+ 228   3                              switch(dt)
+ 229   3                              {
+ 230   4                                      case '1':       num =  SPI_MasterSend(0x5A, 0xAA);
+ 231   4                                                              printf("%04x \n", num);
+ 232   4                                                              break;
+ 233   4                                      case '2':   num =  SPI_MasterSend(0x00, 0x00);
+ 234   4                                                              printf("%04x \n", num);
+ 235   4                                                              break;
+ 236   4                                      case '3':       printf("0x%04x;\n\r",(int) extmas[IN_PACKAGE+5]);
+ 237   4                                                              printf("0x%04x;\n\r",(int) extmas[IN_PACKAGE+6]);
+ 238   4                                                              printf("0x%04x;\n\r",(int) extmas[IN_PACKAGE+7]);
+ 239   4                                                              printf("0x%04x;\n\r",(int) extmas[IN_PACKAGE+8]);
+ 240   4                                                              printf("0x%04x;\n\r",(int) extmas[IN_PACKAGE+9]);
+ 241   4                                                              break;
+C51 COMPILER V9.50a   USB_MAIN                                                             04/03/2023 15:54:11 PAGE 5   
+
+ 242   4                                      case '4':       printf("end_int = %d;\n", end_int);
+ 243   4                                                              break;
+ 244   4                                      case '5':       extmas[0] = (1<<7);
+ 245   4                                                              extmas[0] |= 3;
+ 246   4                                                              extmas[1] = 3;
+ 247   4                                                              extmas[2] = 0x01;
+ 248   4                                                              extmas[3] = 0x02;
+ 249   4                                                              extmas[4] = 0x03;
+ 250   4                                                              extmas[5] = 0x04;
+ 251   4                                                              extmas[6] = 0x05;
+ 252   4                                                              extmas[7] = 0x06;
+ 253   4                                                              break;
+ 254   4                                      case '6':       IE0 = 1;
+ 255   4                                                              printf("inside interrupt=%d\n", (int) inside_interrupt);
+ 256   4                                                              break;
+ 257   4                                      case '7':       for(t=4;t<256;t++) extmas[t]=t;
+ 258   4                                                              printf("0x%04x ? 0x%04x;\n\r", (int) extmas[0], (int) extmas[128]);
+ 259   4                                                              printf("0x%04x ? 0x%04x;\n\r", (int) extmas[1], (int) extmas[129]);
+ 260   4                                                              printf("0x%04x ? 0x%04x;\n\r", (int) extmas[2], (int) extmas[130]);
+ 261   4                                                              break;
+ 262   4                                      case '8':       printf("0x%04x;\n\r",(int) extmas[IN_PACKAGE]);
+ 263   4                                                              printf("0x%04x;\n\r",(int) extmas[IN_PACKAGE+1]);
+ 264   4                                                              printf("0x%04x;\n\r",(int) extmas[IN_PACKAGE+2]);
+ 265   4                                                              printf("0x%04x;\n\r",(int) extmas[IN_PACKAGE+3]);
+ 266   4                                                              printf("0x%04x;\n\r",(int) extmas[IN_PACKAGE+4]);
+ 267   4                                                              break;
+ 268   4                                      case '9':       printf("0x%04x;\n\r",(int) extmas[0]);
+ 269   4                                                              printf("0x%04x;\n\r",(int) extmas[0+1]);
+ 270   4                                                              printf("0x%04x;\n\r",(int) extmas[0+2]);
+ 271   4                                                              printf("0x%04x;\n\r",(int) extmas[0+3]);
+ 272   4                                                              printf("0x%04x;\n\r",(int) extmas[0+4]);
+ 273   4                                                              break;
+ 274   4                                      case 'q':       printf("0x%04x;\n\r",(int) extmas[0+5]);
+ 275   4                                                              printf("0x%04x;\n\r",(int) extmas[0+6]);
+ 276   4                                                              printf("0x%04x;\n\r",(int) extmas[0+7]);
+ 277   4                                                              printf("0x%04x;\n\r",(int) extmas[0+8]);
+ 278   4                                                              printf("0x%04x;\n\r",(int) extmas[0+9]);
+ 279   4                                                              break;
+ 280   4                                      case 'Q':       UART1_Init(9600);
+ 281   4                                                              TIMEOUT_WAIT = 10; // in 10*ms
+ 282   4                                                              TIMEOUT_BYTE = 11; // in 100*mks
+ 283   4                                                              break;
+ 284   4                                      case 'W':       extmas[1] = 1;
+ 285   4                                                              extmas[2] = 8;
+ 286   4                                                              extmas[0] = 1;
+ 287   4                                                              extmas[OUT_PACKAGE] = 0x00;
+ 288   4                                                              extmas[OUT_PACKAGE+1] = 0xAA;
+ 289   4                                                              extmas[OUT_PACKAGE+2] = 'W';
+ 290   4                                                              extmas[OUT_PACKAGE+3] = 'S';
+ 291   4                                                              extmas[OUT_PACKAGE+4] = 0x00;
+ 292   4                                                              extmas[OUT_PACKAGE+5] = 0x9F;
+ 293   4                                                              extmas[OUT_PACKAGE+6] = 3;
+ 294   4                                                              extmas[OUT_PACKAGE+7] = 3;
+ 295   4                                                              break;
+ 296   4                                      case 'E':       UART1_Init(9600);
+ 297   4                                                              buf[0] = 1;
+ 298   4                                                              extmas[3] = 9;
+ 299   4                                                              Make_volkov_package(1, 4, 1);
+ 300   4                                                              break;
+ 301   4                                      case 'R':       UART0_Init(9600);
+ 302   4                                                              buf[0] = 1;
+ 303   4                                                              Make_volkov_package(1, 3, 1);
+C51 COMPILER V9.50a   USB_MAIN                                                             04/03/2023 15:54:11 PAGE 6   
+
+ 304   4                                                              break;
+ 305   4                                      case 'T':       buf[0] = 2;
+ 306   4                                                              Make_volkov_package(1, 3, 1);
+ 307   4                                                              break;
+ 308   4                                      case 'A':       extmas[TYPE_COM] = 3;
+ 309   4                                                              extmas[OUT_PACKAGE] = 0x0a;
+ 310   4                                                              extmas[OUT_PACKAGE+1] = 0xFF;
+ 311   4                                                              break;
+ 312   4                                      case 'a':       extmas[TYPE_COM] = 3;
+ 313   4                                                              extmas[OUT_PACKAGE] = 0x00;
+ 314   4                                                              extmas[OUT_PACKAGE+1] = 0x00;
+ 315   4                                                              break;
+ 316   4                                      case 'S':       extmas[TYPE_COM] = 2;
+ 317   4                                                              extmas[OUT_PACKAGE] = 0x02;
+ 318   4                                                              extmas[OUT_PACKAGE+1] = 0x58;
+ 319   4                                                              break;
+ 320   4      
+ 321   4                                      default: printf("unknown command\n");
+ 322   4                              }
+ 323   3                      }
+ 324   2              }
+ 325   1      }
+*** WARNING C280 IN LINE 181 OF USB_Main.c: 'Nstep': unreferenced local variable
+*** WARNING C280 IN LINE 182 OF USB_Main.c: 'line_state': unreferenced local variable
+ 326          
+ 327          //-----------------------------------------------------------------------------
+ 328          // Initialization Subroutines
+ 329          //-----------------------------------------------------------------------------
+ 330          
+ 331          //-----------------------------------------------------------------------------
+ 332          // Sysclk_Init
+ 333          //-----------------------------------------------------------------------------
+ 334          //
+ 335          // Return Value : None
+ 336          // Parameters   : None
+ 337          //
+ 338          // Initialize the system clock and USB clock
+ 339          //
+ 340          //-----------------------------------------------------------------------------
+ 341          void Sysclk_Init(void)
+ 342          {
+ 343   1      
+ 344   1      #if defined C8051F340_H
+ 345   1              OSCICN |= 0x03;                                         // Configure internal oscillator for
+ 346   1                                                                                      // its maximum frequency and enable
+ 347   1                                                                                      // missing clock detector
+ 348   1              CLKMUL  = 0x00;                                         // Select internal oscillator as
+ 349   1                                                                                      // input to clock multiplier
+ 350   1              CLKMUL |= 0x80;                                         // Enable clock multiplier
+ 351   1              Delay();                                                        // Delay for clock multiplier to begin
+ 352   1              CLKMUL |= 0xC0;                                         // Initialize the clock multiplier
+ 353   1              Delay();                                                        // Delay for clock multiplier to begin
+ 354   1              while(!(CLKMUL & 0x20));                        // Wait for multiplier to lock
+ 355   1              CLKSEL  = SYS_4X | USB_4X_CLOCK;        // Select system clock and USB clock
+ 356   1      #endif // C8051F340_H
+ 357   1      
+ 358   1      }
+ 359          
+ 360          //-----------------------------------------------------------------------------
+ 361          // PORT_Init
+ 362          //-----------------------------------------------------------------------------
+ 363          void Port_Init(void)
+C51 COMPILER V9.50a   USB_MAIN                                                             04/03/2023 15:54:11 PAGE 7   
+
+ 364          {
+ 365   1          // P0.0  -  SCK  (SPI0), Open-Drain, Digital
+ 366   1          // P0.1  -  MISO (SPI0), Open-Drain, Digital
+ 367   1          // P0.2  -  MOSI (SPI0), Open-Drain, Digital
+ 368   1          // P0.3  -  NSS  (SPI0), Open-Drain, Digital
+ 369   1          // P0.4  -  TX0 (UART0), Push-Pull,  Digital
+ 370   1          // P0.5  -  RX0 (UART0), Open-Drain, Digital
+ 371   1          // P0.6  -  Skipped,     Open-Drain, Digital
+ 372   1          // P0.7  -  TX1 (UART1), Push-Pull,  Digital
+ 373   1      
+ 374   1          // P1.0  -  RX1 (UART1), Open-Drain, Digital
+ 375   1          // P1.1  -  Skipped,     Open-Drain, Digital
+ 376   1          // P1.2  -  Skipped,     Open-Drain, Digital
+ 377   1          // P1.3  -  Skipped,     Open-Drain, Digital
+ 378   1          // P1.4  -  Skipped,     Open-Drain, Digital
+ 379   1          // P1.5  -  Skipped,     Open-Drain, Digital
+ 380   1          // P1.6  -  Skipped,     Open-Drain, Digital
+ 381   1          // P1.7  -  Skipped,     Open-Drain, Digital
+ 382   1      
+ 383   1          // P2.0  -  Skipped,     Open-Drain, Digital
+ 384   1          // P2.1  -  Skipped,     Open-Drain, Digital
+ 385   1          // P2.2  -  Skipped,     Open-Drain, Digital
+ 386   1          // P2.3  -  Skipped,     Open-Drain, Digital
+ 387   1          // P2.4  -  Skipped,     Open-Drain, Digital
+ 388   1          // P2.5  -  Skipped,     Open-Drain, Digital
+ 389   1          // P2.6  -  Skipped,     Open-Drain, Digital
+ 390   1          // P2.7  -  Skipped,     Open-Drain, Digital
+ 391   1      
+ 392   1          // P3.0  -  Skipped,     Open-Drain, Digital
+ 393   1          // P3.1  -  Skipped,     Open-Drain, Digital
+ 394   1          // P3.2  -  Skipped,     Open-Drain, Digital
+ 395   1          // P3.3  -  Skipped,     Open-Drain, Digital
+ 396   1          // P3.4  -  Skipped,     Open-Drain, Digital
+ 397   1          // P3.5  -  Skipped,     Open-Drain, Digital
+ 398   1          // P3.6  -  Skipped,     Open-Drain, Digital
+ 399   1          // P3.7  -  Skipped,     Open-Drain, Digital
+ 400   1          P0MDOUT   = 0x9D;
+ 401   1          P1MDOUT   = 0xFE;
+ 402   1              P3MDOUT   = 0xFF;
+ 403   1              P4MDOUT   = 0xFF;
+ 404   1          P0SKIP    = 0x48;
+ 405   1          P1SKIP    = 0xFE;
+ 406   1          P2SKIP    = 0xFF;
+ 407   1          P3SKIP    = 0xFF;
+ 408   1          XBR0      = 0x03;
+ 409   1          XBR1      = 0x40;
+ 410   1          XBR2      = 0x01;
+ 411   1              P3 = 0xFF;
+ 412   1              P4 = 0xFF;
+ 413   1      }
+ 414          
+ 415          //-----------------------------------------------------------------------------
+ 416          // Usb0_Init
+ 417          //-----------------------------------------------------------------------------
+ 418          //
+ 419          // Return Value : None
+ 420          // Parameters   : None
+ 421          // 
+ 422          // - Initialize USB0
+ 423          // - Enable USB0 interrupts
+ 424          // - Enable USB0 transceiver
+ 425          // - Enable USB0 with suspend detection
+C51 COMPILER V9.50a   USB_MAIN                                                             04/03/2023 15:54:11 PAGE 8   
+
+ 426          //-----------------------------------------------------------------------------
+ 427          void Usb0_Init(void)
+ 428          {
+ 429   1              POLL_WRITE_BYTE(POWER,  0x08);          // Force Asynchronous USB Reset
+ 430   1                                                                                      // USB Interrupt enable flags are reset by USB bus reset
+ 431   1                                                                                      // 
+ 432   1              POLL_WRITE_BYTE(IN1IE,  0x01);          // Enable EP 0 interrupt, disable EP1-3 IN interrupt
+ 433   1              POLL_WRITE_BYTE(OUT1IE, 0x00);          // Disable EP 1-3 OUT interrupts
+ 434   1              POLL_WRITE_BYTE(CMIE,   0x05);          // Enable Reset and Suspend interrupts
+ 435   1      
+ 436   1              USB0XCN = 0xE0;                                         // Enable transceiver; select full speed
+ 437   1              POLL_WRITE_BYTE(CLKREC, 0x80);          // Enable clock recovery, single-step mode
+ 438   1                                                                                      // disabled
+ 439   1                                                                                      // Enable USB0 by clearing the USB 
+ 440   1                                                                                      // Inhibit bit
+ 441   1              POLL_WRITE_BYTE(POWER,  0x01);          // and enable suspend detection
+ 442   1      }
+ 443          
+ 444          //-----------------------------------------------------------------------------
+ 445          // Delay
+ 446          //-----------------------------------------------------------------------------
+ 447          //
+ 448          // Used for a small pause, approximately 80 us in Full Speed,
+ 449          // and 1 ms when clock is configured for Low Speed
+ 450          //
+ 451          //-----------------------------------------------------------------------------
+ 452          
+ 453          void Delay(void)
+ 454          {
+ 455   1              int x;
+ 456   1              for(x = 0;x < 500;x)
+ 457   1                      x++;
+ 458   1      }
+ 459          
+ 460          //-----------------------------------------------------------------------------
+ 461          // End Of File
+ 462          //-----------------------------------------------------------------------------
+C51 COMPILER V9.50a   USB_MAIN                                                             04/03/2023 15:54:11 PAGE 9   
+
+ASSEMBLY LISTING OF GENERATED OBJECT CODE
+
+
+             ; FUNCTION _getkey (BEGIN)
+                                           ; SOURCE LINE # 100
+                                           ; SOURCE LINE # 102
+0000 7800        R     MOV     R0,#LOW c
+0002 7430              MOV     A,#030H
+0004 F2                MOVX    @R0,A
+0005         ?C0003:
+                                           ; SOURCE LINE # 104
+                                           ; SOURCE LINE # 105
+0005 120000      E     LCALL   Handle_In2
+                                           ; SOURCE LINE # 106
+0008 120000      E     LCALL   Handle_Out2
+                                           ; SOURCE LINE # 107
+000B 3000F7      E     JNB     RXReady,?C0003
+000E 3000F4      E     JNB     TXReady,?C0003
+                                           ; SOURCE LINE # 108
+0011 120000      E     LCALL   COMGetByte
+0014 7800        R     MOV     R0,#LOW c
+0016 EF                MOV     A,R7
+0017 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 109
+                                           ; SOURCE LINE # 110
+0018         ?C0004:
+0018 22                RET     
+             ; FUNCTION _getkey (END)
+
+             ; FUNCTION _putchar (BEGIN)
+                                           ; SOURCE LINE # 117
+0000 7800        R     MOV     R0,#LOW c
+0002 EF                MOV     A,R7
+0003 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 120
+0004 BF0A08            CJNE    R7,#0AH,?C0008
+0007         ?C0006:
+                                           ; SOURCE LINE # 121
+0007 2000FD      E     JB      TXReady,?C0006
+000A         ?C0007:
+                                           ; SOURCE LINE # 122
+000A 7F0D              MOV     R7,#0DH
+000C 120000      E     LCALL   _COMPutByte
+                                           ; SOURCE LINE # 123
+000F         ?C0008:
+                                           ; SOURCE LINE # 126
+000F 2000FD      E     JB      TXReady,?C0008
+0012         ?C0009:
+                                           ; SOURCE LINE # 127
+0012 7800        R     MOV     R0,#LOW c
+0014 E2                MOVX    A,@R0
+0015 FF                MOV     R7,A
+0016 120000      E     LCALL   _COMPutByte
+                                           ; SOURCE LINE # 129
+0019 7800        R     MOV     R0,#LOW c
+001B E2                MOVX    A,@R0
+001C FF                MOV     R7,A
+                                           ; SOURCE LINE # 130
+001D         ?C0010:
+001D 22                RET     
+             ; FUNCTION _putchar (END)
+
+C51 COMPILER V9.50a   USB_MAIN                                                             04/03/2023 15:54:11 PAGE 10  
+
+             ; FUNCTION showhelp (BEGIN)
+                                           ; SOURCE LINE # 132
+                                           ; SOURCE LINE # 133
+                                           ; SOURCE LINE # 134
+0000 7BFF              MOV     R3,#0FFH
+0002 7A00        R     MOV     R2,#HIGH ?SC_0
+0004 7900        R     MOV     R1,#LOW ?SC_0
+0006 020000      E     LJMP    _printf
+             ; FUNCTION showhelp (END)
+
+             ; FUNCTION _checkbit (BEGIN)
+                                           ; SOURCE LINE # 137
+;---- Variable 'result' assigned to Register 'R2/R3' ----
+;---- Variable 'position' assigned to Register 'R4/R5' ----
+;---- Variable 'value' assigned to Register 'DPTR' ----
+0000 8F82              MOV     DPL,R7
+0002 8E83              MOV     DPH,R6
+                                           ; SOURCE LINE # 139
+0004 AF05              MOV     R7,AR5
+0006 7401              MOV     A,#01H
+0008 7E00              MOV     R6,#00H
+000A A807              MOV     R0,AR7
+000C 08                INC     R0
+000D 8005              SJMP    ?C0079
+000F         ?C0078:
+000F C3                CLR     C
+0010 33                RLC     A
+0011 CE                XCH     A,R6
+0012 33                RLC     A
+0013 CE                XCH     A,R6
+0014         ?C0079:
+0014 D8F9              DJNZ    R0,?C0078
+0016 FF                MOV     R7,A
+0017 AC83              MOV     R4,DPH
+0019 AD82              MOV     R5,DPL
+001B EE                MOV     A,R6
+001C 5C                ANL     A,R4
+001D FE                MOV     R6,A
+001E EF                MOV     A,R7
+001F 5D                ANL     A,R5
+0020 4E                ORL     A,R6
+0021 7004              JNZ     ?C0012
+                                           ; SOURCE LINE # 140
+0023 FA                MOV     R2,A
+0024 FB                MOV     R3,A
+                                           ; SOURCE LINE # 141
+0025 8004              SJMP    ?C0013
+0027         ?C0012:
+                                           ; SOURCE LINE # 142
+0027 7A00              MOV     R2,#00H
+0029 7B01              MOV     R3,#01H
+                                           ; SOURCE LINE # 143
+002B         ?C0013:
+                                           ; SOURCE LINE # 144
+002B AF03              MOV     R7,AR3
+002D AE02              MOV     R6,AR2
+                                           ; SOURCE LINE # 145
+002F         ?C0014:
+002F 22                RET     
+             ; FUNCTION _checkbit (END)
+
+             ; FUNCTION _Make_volkov_package (BEGIN)
+C51 COMPILER V9.50a   USB_MAIN                                                             04/03/2023 15:54:11 PAGE 11  
+
+                                           ; SOURCE LINE # 147
+0000 7800        R     MOV     R0,#LOW adr
+0002 ED                MOV     A,R5
+0003 F2                MOVX    @R0,A
+;---- Variable 'nch' assigned to Register 'R7' ----
+;---- Variable 'N' assigned to Register 'R2/R3' ----
+                                           ; SOURCE LINE # 148
+                                           ; SOURCE LINE # 149
+;---- Variable 'xSum' assigned to Register 'R1' ----
+0004 E4                CLR     A
+                                           ; SOURCE LINE # 150
+;---- Variable 'i' assigned to Register 'R4/R5' ----
+0005 FD                MOV     R5,A
+0006 FC                MOV     R4,A
+                                           ; SOURCE LINE # 151
+0007 900000      E     MOV     DPTR,#extmas+01H
+000A EF                MOV     A,R7
+000B F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 152
+000C EB                MOV     A,R3
+000D 2404              ADD     A,#04H
+000F A3                INC     DPTR
+0010 F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 153
+0011 900000      E     MOV     DPTR,#extmas
+0014 7401              MOV     A,#01H
+0016 F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 154
+0017 900000      E     MOV     DPTR,#extmas+04H
+001A 74AA              MOV     A,#0AAH
+001C F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 155
+001D E2                MOVX    A,@R0
+001E FF                MOV     R7,A
+001F A3                INC     DPTR
+0020 F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 156
+0021 A907              MOV     R1,AR7
+                                           ; SOURCE LINE # 157
+0023         ?C0015:
+0023 C3                CLR     C
+0024 ED                MOV     A,R5
+0025 9B                SUBB    A,R3
+0026 EA                MOV     A,R2
+0027 6480              XRL     A,#080H
+0029 F8                MOV     R0,A
+002A EC                MOV     A,R4
+002B 6480              XRL     A,#080H
+002D 98                SUBB    A,R0
+002E 4003              JC      $ + 5H
+0030 020000      R     LJMP    ?C0016
+                                           ; SOURCE LINE # 158
+                                           ; SOURCE LINE # 159
+0033 7400        R     MOV     A,#LOW buf
+0035 2D                ADD     A,R5
+0036 F582              MOV     DPL,A
+0038 7400        R     MOV     A,#HIGH buf
+003A 3C                ADDC    A,R4
+003B F583              MOV     DPH,A
+003D E0                MOVX    A,@DPTR
+003E FF                MOV     R7,A
+003F 64AB              XRL     A,#0ABH
+C51 COMPILER V9.50a   USB_MAIN                                                             04/03/2023 15:54:11 PAGE 12  
+
+0041 6004              JZ      ?C0019
+0043 7E01              MOV     R6,#01H
+0045 8002              SJMP    ?C0020
+0047         ?C0019:
+0047 7E00              MOV     R6,#00H
+0049         ?C0020:
+0049 EF                MOV     A,R7
+004A 64AA              XRL     A,#0AAH
+004C 6004              JZ      ?C0021
+004E 7F01              MOV     R7,#01H
+0050 8002              SJMP    ?C0022
+0052         ?C0021:
+0052 7F00              MOV     R7,#00H
+0054         ?C0022:
+0054 EF                MOV     A,R7
+0055 5E                ANL     A,R6
+0056 FF                MOV     R7,A
+0057 7400        R     MOV     A,#LOW buf
+0059 2D                ADD     A,R5
+005A F582              MOV     DPL,A
+005C 7400        R     MOV     A,#HIGH buf
+005E 3C                ADDC    A,R4
+005F F583              MOV     DPH,A
+0061 E0                MOVX    A,@DPTR
+0062 64AC              XRL     A,#0ACH
+0064 6004              JZ      ?C0023
+0066 7E01              MOV     R6,#01H
+0068 8002              SJMP    ?C0024
+006A         ?C0023:
+006A 7E00              MOV     R6,#00H
+006C         ?C0024:
+006C EE                MOV     A,R6
+006D 5F                ANL     A,R7
+006E 600D              JZ      ?C0018
+                                           ; SOURCE LINE # 160
+                                           ; SOURCE LINE # 161
+0070 7400        R     MOV     A,#LOW buf
+0072 2D                ADD     A,R5
+0073 F582              MOV     DPL,A
+0075 7400        R     MOV     A,#HIGH buf
+0077 3C                ADDC    A,R4
+0078 F583              MOV     DPH,A
+007A E0                MOVX    A,@DPTR
+                                           ; SOURCE LINE # 162
+007B 801A              SJMP    ?C0084
+007D         ?C0018:
+                                           ; SOURCE LINE # 163
+                                           ; SOURCE LINE # 164
+007D 7400        E     MOV     A,#LOW extmas+06H
+007F 2D                ADD     A,R5
+0080 F582              MOV     DPL,A
+0082 7400        E     MOV     A,#HIGH extmas+06H
+0084 3C                ADDC    A,R4
+0085 F583              MOV     DPH,A
+0087 74AC              MOV     A,#0ACH
+0089 F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 165
+008A 7400        R     MOV     A,#LOW buf
+008C 2D                ADD     A,R5
+008D F582              MOV     DPL,A
+008F 7400        R     MOV     A,#HIGH buf
+0091 3C                ADDC    A,R4
+C51 COMPILER V9.50a   USB_MAIN                                                             04/03/2023 15:54:11 PAGE 13  
+
+0092 F583              MOV     DPH,A
+0094 E0                MOVX    A,@DPTR
+0095 2454              ADD     A,#054H
+0097         ?C0084:
+0097 FF                MOV     R7,A
+0098 7400        E     MOV     A,#LOW extmas+06H
+009A 2D                ADD     A,R5
+009B F582              MOV     DPL,A
+009D 7400        E     MOV     A,#HIGH extmas+06H
+009F 3C                ADDC    A,R4
+00A0 F583              MOV     DPH,A
+00A2 EF                MOV     A,R7
+00A3 F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 166
+00A4         ?C0025:
+                                           ; SOURCE LINE # 167
+00A4 7400        R     MOV     A,#LOW buf
+00A6 2D                ADD     A,R5
+00A7 F582              MOV     DPL,A
+00A9 7400        R     MOV     A,#HIGH buf
+00AB 3C                ADDC    A,R4
+00AC F583              MOV     DPH,A
+00AE E0                MOVX    A,@DPTR
+00AF 69                XRL     A,R1
+00B0 F9                MOV     R1,A
+                                           ; SOURCE LINE # 168
+00B1 0D                INC     R5
+00B2 BD0001            CJNE    R5,#00H,?C0080
+00B5 0C                INC     R4
+00B6         ?C0080:
+00B6 020000      R     LJMP    ?C0015
+00B9         ?C0016:
+                                           ; SOURCE LINE # 169
+00B9 7400        E     MOV     A,#LOW extmas+06H
+00BB 2B                ADD     A,R3
+00BC F582              MOV     DPL,A
+00BE 7400        E     MOV     A,#HIGH extmas+06H
+00C0 3A                ADDC    A,R2
+00C1 F583              MOV     DPH,A
+00C3 E9                MOV     A,R1
+00C4 F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 170
+00C5 7400        E     MOV     A,#LOW extmas+07H
+00C7 2B                ADD     A,R3
+00C8 F582              MOV     DPL,A
+00CA 7400        E     MOV     A,#HIGH extmas+07H
+00CC 3A                ADDC    A,R2
+00CD F583              MOV     DPH,A
+00CF 74AB              MOV     A,#0ABH
+00D1 F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 171
+00D2 22                RET     
+             ; FUNCTION _Make_volkov_package (END)
+
+             ; FUNCTION main (BEGIN)
+                                           ; SOURCE LINE # 176
+                                           ; SOURCE LINE # 177
+                                           ; SOURCE LINE # 183
+0000 7800        R     MOV     R0,#LOW abd
+0002 74FF              MOV     A,#0FFH
+0004 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 184
+C51 COMPILER V9.50a   USB_MAIN                                                             04/03/2023 15:54:11 PAGE 14  
+
+0005 E4                CLR     A
+0006 08                INC     R0
+0007 F2                MOVX    @R0,A
+0008 08                INC     R0
+0009 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 188
+000A 53D9BF            ANL     PCA0MD,#0BFH
+                                           ; SOURCE LINE # 192
+000D 120000      R     LCALL   Sysclk_Init
+                                           ; SOURCE LINE # 193
+0010 120000      R     LCALL   Port_Init
+                                           ; SOURCE LINE # 194
+0013 120000      E     LCALL   init_exram
+                                           ; SOURCE LINE # 195
+0016 120000      R     LCALL   Usb0_Init
+                                           ; SOURCE LINE # 196
+0019 120000      E     LCALL   Timer_Init
+                                           ; SOURCE LINE # 197
+001C 7F80              MOV     R7,#080H
+001E 7E25              MOV     R6,#025H
+0020 120000      E     LCALL   _UART0_Init
+                                           ; SOURCE LINE # 198
+0023 7F80              MOV     R7,#080H
+0025 7E25              MOV     R6,#025H
+0027 120000      E     LCALL   _UART1_Init
+                                           ; SOURCE LINE # 199
+002A 120000      E     LCALL   INT0_Init
+                                           ; SOURCE LINE # 200
+002D 120000      E     LCALL   SPI_Init
+                                           ; SOURCE LINE # 201
+0030 120000      E     LCALL   Flush_COMbuffers
+                                           ; SOURCE LINE # 204
+0033 43E602            ORL     EIE1,#02H
+                                           ; SOURCE LINE # 205
+0036 43A8A0            ORL     IE,#0A0H
+                                           ; SOURCE LINE # 207
+0039 7BFF              MOV     R3,#0FFH
+003B 7A00        R     MOV     R2,#HIGH ?SC_6
+003D 7900        R     MOV     R1,#LOW ?SC_6
+003F 120000      E     LCALL   _printf
+0042         ?C0027:
+                                           ; SOURCE LINE # 208
+                                           ; SOURCE LINE # 209
+                                           ; SOURCE LINE # 210
+0042 7800        E     MOV     R0,#LOW i_flag
+0044 E2                MOVX    A,@R0
+0045 600D              JZ      ?C0029
+                                           ; SOURCE LINE # 211
+                                           ; SOURCE LINE # 212
+0047 7BFF              MOV     R3,#0FFH
+0049 7A00        R     MOV     R2,#HIGH ?SC_19
+004B 7900        R     MOV     R1,#LOW ?SC_19
+004D 120000      E     LCALL   _printf
+                                           ; SOURCE LINE # 213
+0050 E4                CLR     A
+0051 7800        E     MOV     R0,#LOW i_flag
+0053 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 214
+0054         ?C0029:
+                                           ; SOURCE LINE # 215
+0054 7800        E     MOV     R0,#LOW end_int
+0056 E2                MOVX    A,@R0
+C51 COMPILER V9.50a   USB_MAIN                                                             04/03/2023 15:54:11 PAGE 15  
+
+0057 B40113            CJNE    A,#01H,?C0030
+                                           ; SOURCE LINE # 216
+                                           ; SOURCE LINE # 217
+005A E4                CLR     A
+005B FD                MOV     R5,A
+005C FF                MOV     R7,A
+005D 120000      E     LCALL   _SPI_MasterSend
+                                           ; SOURCE LINE # 218
+0060 7BFF              MOV     R3,#0FFH
+0062 7A00        R     MOV     R2,#HIGH ?SC_31
+0064 7900        R     MOV     R1,#LOW ?SC_31
+0066 120000      E     LCALL   _printf
+                                           ; SOURCE LINE # 219
+0069 E4                CLR     A
+006A 7800        E     MOV     R0,#LOW end_int
+006C F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 221
+006D         ?C0030:
+                                           ; SOURCE LINE # 222
+006D 120000      E     LCALL   Handle_In2
+                                           ; SOURCE LINE # 223
+0070 120000      E     LCALL   Handle_Out2
+0073         ?C0031:
+                                           ; SOURCE LINE # 224
+0073 3000CC      E     JNB     TXReady,?C0027
+0076 3000C9      E     JNB     RXReady,?C0027
+                                           ; SOURCE LINE # 225
+                                           ; SOURCE LINE # 226
+0079 120000      E     LCALL   COMGetByte
+007C 7800        R     MOV     R0,#LOW dt
+007E EF                MOV     A,R7
+007F F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 227
+0080 7BFF              MOV     R3,#0FFH
+0082 7A00        R     MOV     R2,#HIGH ?SC_57
+0084 7900        R     MOV     R1,#LOW ?SC_57
+0086 7800        E     MOV     R0,#LOW ?_printf?BYTE+03H
+0088 F2                MOVX    @R0,A
+0089 120000      E     LCALL   _printf
+                                           ; SOURCE LINE # 228
+008C 7800        R     MOV     R0,#LOW dt
+008E E2                MOVX    A,@R0
+008F 120000      E     LCALL   ?C?CCASE
+0092 0000        R     DW      ?C0034
+0094 31                DB      031H
+0095 0000        R     DW      ?C0035
+0097 32                DB      032H
+0098 0000        R     DW      ?C0036
+009A 33                DB      033H
+009B 0000        R     DW      ?C0037
+009D 34                DB      034H
+009E 0000        R     DW      ?C0038
+00A0 35                DB      035H
+00A1 0000        R     DW      ?C0039
+00A3 36                DB      036H
+00A4 0000        R     DW      ?C0040
+00A6 37                DB      037H
+00A7 0000        R     DW      ?C0044
+00A9 38                DB      038H
+00AA 0000        R     DW      ?C0045
+00AC 39                DB      039H
+00AD 0000        R     DW      ?C0052
+C51 COMPILER V9.50a   USB_MAIN                                                             04/03/2023 15:54:11 PAGE 16  
+
+00AF 41                DB      041H
+00B0 0000        R     DW      ?C0049
+00B2 45                DB      045H
+00B3 0000        R     DW      ?C0047
+00B5 51                DB      051H
+00B6 0000        R     DW      ?C0050
+00B8 52                DB      052H
+00B9 0000        R     DW      ?C0054
+00BB 53                DB      053H
+00BC 0000        R     DW      ?C0051
+00BE 54                DB      054H
+00BF 0000        R     DW      ?C0048
+00C1 57                DB      057H
+00C2 0000        R     DW      ?C0053
+00C4 61                DB      061H
+00C5 0000        R     DW      ?C0046
+00C7 71                DB      071H
+00C8 0000              DW      00H
+00CA 0000        R     DW      ?C0055
+                                           ; SOURCE LINE # 229
+                                           ; SOURCE LINE # 230
+00CC         ?C0034:
+00CC 7DAA              MOV     R5,#0AAH
+00CE 7F5A              MOV     R7,#05AH
+                                           ; SOURCE LINE # 231
+                                           ; SOURCE LINE # 232
+00D0 8003              SJMP    ?C0085
+                                           ; SOURCE LINE # 233
+00D2         ?C0035:
+00D2 E4                CLR     A
+00D3 FD                MOV     R5,A
+00D4 FF                MOV     R7,A
+00D5         ?C0085:
+00D5 120000      E     LCALL   _SPI_MasterSend
+00D8 7800        R     MOV     R0,#LOW num
+00DA EE                MOV     A,R6
+00DB F2                MOVX    @R0,A
+00DC 08                INC     R0
+00DD EF                MOV     A,R7
+00DE F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 234
+00DF 7BFF              MOV     R3,#0FFH
+00E1 7A00        R     MOV     R2,#HIGH ?SC_61
+00E3 7900        R     MOV     R1,#LOW ?SC_61
+00E5 7800        E     MOV     R0,#LOW ?_printf?BYTE+03H
+00E7 EE                MOV     A,R6
+                                           ; SOURCE LINE # 235
+00E8 020000      R     LJMP    ?C0086
+                                           ; SOURCE LINE # 236
+00EB         ?C0036:
+00EB 7BFF              MOV     R3,#0FFH
+00ED 7A00        R     MOV     R2,#HIGH ?SC_68
+00EF 7900        R     MOV     R1,#LOW ?SC_68
+00F1 900000      E     MOV     DPTR,#extmas+086H
+00F4 E0                MOVX    A,@DPTR
+00F5 FF                MOV     R7,A
+00F6 7800        E     MOV     R0,#LOW ?_printf?BYTE+03H
+00F8 E4                CLR     A
+00F9 F2                MOVX    @R0,A
+00FA 08                INC     R0
+00FB EF                MOV     A,R7
+00FC F2                MOVX    @R0,A
+C51 COMPILER V9.50a   USB_MAIN                                                             04/03/2023 15:54:11 PAGE 17  
+
+00FD 120000      E     LCALL   _printf
+                                           ; SOURCE LINE # 237
+0100 7BFF              MOV     R3,#0FFH
+0102 7A00        R     MOV     R2,#HIGH ?SC_68
+0104 7900        R     MOV     R1,#LOW ?SC_68
+0106 900000      E     MOV     DPTR,#extmas+087H
+0109 E0                MOVX    A,@DPTR
+010A FF                MOV     R7,A
+010B 7800        E     MOV     R0,#LOW ?_printf?BYTE+03H
+010D E4                CLR     A
+010E F2                MOVX    @R0,A
+010F 08                INC     R0
+0110 EF                MOV     A,R7
+0111 F2                MOVX    @R0,A
+0112 120000      E     LCALL   _printf
+                                           ; SOURCE LINE # 238
+0115 7BFF              MOV     R3,#0FFH
+0117 7A00        R     MOV     R2,#HIGH ?SC_68
+0119 7900        R     MOV     R1,#LOW ?SC_68
+011B 900000      E     MOV     DPTR,#extmas+088H
+011E E0                MOVX    A,@DPTR
+011F FF                MOV     R7,A
+0120 7800        E     MOV     R0,#LOW ?_printf?BYTE+03H
+0122 E4                CLR     A
+0123 F2                MOVX    @R0,A
+0124 08                INC     R0
+0125 EF                MOV     A,R7
+0126 F2                MOVX    @R0,A
+0127 120000      E     LCALL   _printf
+                                           ; SOURCE LINE # 239
+012A 7BFF              MOV     R3,#0FFH
+012C 7A00        R     MOV     R2,#HIGH ?SC_68
+012E 7900        R     MOV     R1,#LOW ?SC_68
+0130 900000      E     MOV     DPTR,#extmas+089H
+0133 E0                MOVX    A,@DPTR
+0134 FF                MOV     R7,A
+0135 7800        E     MOV     R0,#LOW ?_printf?BYTE+03H
+0137 E4                CLR     A
+0138 F2                MOVX    @R0,A
+0139 08                INC     R0
+013A EF                MOV     A,R7
+013B F2                MOVX    @R0,A
+013C 120000      E     LCALL   _printf
+                                           ; SOURCE LINE # 240
+013F 7BFF              MOV     R3,#0FFH
+0141 7A00        R     MOV     R2,#HIGH ?SC_68
+0143 7900        R     MOV     R1,#LOW ?SC_68
+0145 900000      E     MOV     DPTR,#extmas+08AH
+                                           ; SOURCE LINE # 241
+0148 020000      R     LJMP    ?C0087
+                                           ; SOURCE LINE # 242
+014B         ?C0037:
+014B 7BFF              MOV     R3,#0FFH
+014D 7A00        R     MOV     R2,#HIGH ?SC_78
+014F 7900        R     MOV     R1,#LOW ?SC_78
+0151 7800        E     MOV     R0,#LOW end_int
+0153 E2                MOVX    A,@R0
+0154 7800        E     MOV     R0,#LOW ?_printf?BYTE+03H
+                                           ; SOURCE LINE # 243
+0156 020000      R     LJMP    ?C0092
+                                           ; SOURCE LINE # 244
+0159         ?C0038:
+C51 COMPILER V9.50a   USB_MAIN                                                             04/03/2023 15:54:11 PAGE 18  
+
+0159 900000      E     MOV     DPTR,#extmas
+015C 7480              MOV     A,#080H
+015E F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 245
+015F E0                MOVX    A,@DPTR
+0160 4403              ORL     A,#03H
+0162 F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 246
+0163 A3                INC     DPTR
+0164 7403              MOV     A,#03H
+0166 F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 247
+0167 A3                INC     DPTR
+0168 7401              MOV     A,#01H
+016A F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 248
+016B A3                INC     DPTR
+016C 04                INC     A
+016D F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 249
+016E A3                INC     DPTR
+016F 04                INC     A
+0170 F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 250
+0171 A3                INC     DPTR
+0172 04                INC     A
+0173 F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 251
+0174 A3                INC     DPTR
+0175 04                INC     A
+0176 F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 252
+0177 A3                INC     DPTR
+0178 04                INC     A
+0179 F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 253
+017A 020000      R     LJMP    ?C0031
+                                           ; SOURCE LINE # 254
+017D         ?C0039:
+017D D289              SETB    IE0
+                                           ; SOURCE LINE # 255
+017F 7BFF              MOV     R3,#0FFH
+0181 7A00        R     MOV     R2,#HIGH ?SC_93
+0183 7900        R     MOV     R1,#LOW ?SC_93
+0185 7800        E     MOV     R0,#LOW inside_interrupt
+0187 E2                MOVX    A,@R0
+0188 FF                MOV     R7,A
+0189 7800        E     MOV     R0,#LOW ?_printf?BYTE+03H
+018B E4                CLR     A
+018C         ?C0086:
+018C F2                MOVX    @R0,A
+018D 08                INC     R0
+018E EF                MOV     A,R7
+018F         ?C0088:
+                                           ; SOURCE LINE # 256
+018F 020000      R     LJMP    ?C0092
+                                           ; SOURCE LINE # 257
+0192         ?C0040:
+;---- Variable 't' assigned to Register 'R6/R7' ----
+0192 7F04              MOV     R7,#04H
+0194 7E00              MOV     R6,#00H
+0196         ?C0041:
+C51 COMPILER V9.50a   USB_MAIN                                                             04/03/2023 15:54:11 PAGE 19  
+
+0196 7400        E     MOV     A,#LOW extmas
+0198 2F                ADD     A,R7
+0199 F582              MOV     DPL,A
+019B 7400        E     MOV     A,#HIGH extmas
+019D 3E                ADDC    A,R6
+019E F583              MOV     DPH,A
+01A0 EF                MOV     A,R7
+01A1 F0                MOVX    @DPTR,A
+01A2 0F                INC     R7
+01A3 BF0001            CJNE    R7,#00H,?C0081
+01A6 0E                INC     R6
+01A7         ?C0081:
+01A7 E4                CLR     A
+01A8 B507EB            CJNE    A,AR7,?C0041
+01AB EE                MOV     A,R6
+01AC B401E7            CJNE    A,#01H,?C0041
+01AF         ?C0042:
+                                           ; SOURCE LINE # 258
+01AF 7BFF              MOV     R3,#0FFH
+01B1 7A00        R     MOV     R2,#HIGH ?SC_114
+01B3 7900        R     MOV     R1,#LOW ?SC_114
+01B5 900000      E     MOV     DPTR,#extmas
+01B8 E0                MOVX    A,@DPTR
+01B9 FF                MOV     R7,A
+01BA 7800        E     MOV     R0,#LOW ?_printf?BYTE+03H
+01BC E4                CLR     A
+01BD F2                MOVX    @R0,A
+01BE 08                INC     R0
+01BF EF                MOV     A,R7
+01C0 F2                MOVX    @R0,A
+01C1 900000      E     MOV     DPTR,#extmas+080H
+01C4 E0                MOVX    A,@DPTR
+01C5 FF                MOV     R7,A
+01C6 08                INC     R0
+01C7 E4                CLR     A
+01C8 F2                MOVX    @R0,A
+01C9 08                INC     R0
+01CA EF                MOV     A,R7
+01CB F2                MOVX    @R0,A
+01CC 120000      E     LCALL   _printf
+                                           ; SOURCE LINE # 259
+01CF 7BFF              MOV     R3,#0FFH
+01D1 7A00        R     MOV     R2,#HIGH ?SC_114
+01D3 7900        R     MOV     R1,#LOW ?SC_114
+01D5 900000      E     MOV     DPTR,#extmas+01H
+01D8 E0                MOVX    A,@DPTR
+01D9 FF                MOV     R7,A
+01DA 7800        E     MOV     R0,#LOW ?_printf?BYTE+03H
+01DC E4                CLR     A
+01DD F2                MOVX    @R0,A
+01DE 08                INC     R0
+01DF EF                MOV     A,R7
+01E0 F2                MOVX    @R0,A
+01E1 900000      E     MOV     DPTR,#extmas+081H
+01E4 E0                MOVX    A,@DPTR
+01E5 FF                MOV     R7,A
+01E6 08                INC     R0
+01E7 E4                CLR     A
+01E8 F2                MOVX    @R0,A
+01E9 08                INC     R0
+01EA EF                MOV     A,R7
+01EB F2                MOVX    @R0,A
+C51 COMPILER V9.50a   USB_MAIN                                                             04/03/2023 15:54:11 PAGE 20  
+
+01EC 120000      E     LCALL   _printf
+                                           ; SOURCE LINE # 260
+01EF 7BFF              MOV     R3,#0FFH
+01F1 7A00        R     MOV     R2,#HIGH ?SC_114
+01F3 7900        R     MOV     R1,#LOW ?SC_114
+01F5 900000      E     MOV     DPTR,#extmas+02H
+01F8 E0                MOVX    A,@DPTR
+01F9 FF                MOV     R7,A
+01FA 7800        E     MOV     R0,#LOW ?_printf?BYTE+03H
+01FC E4                CLR     A
+01FD F2                MOVX    @R0,A
+01FE 08                INC     R0
+01FF EF                MOV     A,R7
+0200 F2                MOVX    @R0,A
+0201 900000      E     MOV     DPTR,#extmas+082H
+0204 E0                MOVX    A,@DPTR
+0205 FF                MOV     R7,A
+0206 08                INC     R0
+0207 E4                CLR     A
+0208 F2                MOVX    @R0,A
+0209 08                INC     R0
+020A EF                MOV     A,R7
+020B         ?C0089:
+                                           ; SOURCE LINE # 261
+020B 020000      R     LJMP    ?C0092
+                                           ; SOURCE LINE # 262
+020E         ?C0044:
+020E 7BFF              MOV     R3,#0FFH
+0210 7A00        R     MOV     R2,#HIGH ?SC_68
+0212 7900        R     MOV     R1,#LOW ?SC_68
+0214 900000      E     MOV     DPTR,#extmas+081H
+0217 E0                MOVX    A,@DPTR
+0218 FF                MOV     R7,A
+0219 7800        E     MOV     R0,#LOW ?_printf?BYTE+03H
+021B E4                CLR     A
+021C F2                MOVX    @R0,A
+021D 08                INC     R0
+021E EF                MOV     A,R7
+021F F2                MOVX    @R0,A
+0220 120000      E     LCALL   _printf
+                                           ; SOURCE LINE # 263
+0223 7BFF              MOV     R3,#0FFH
+0225 7A00        R     MOV     R2,#HIGH ?SC_68
+0227 7900        R     MOV     R1,#LOW ?SC_68
+0229 900000      E     MOV     DPTR,#extmas+082H
+022C E0                MOVX    A,@DPTR
+022D FF                MOV     R7,A
+022E 7800        E     MOV     R0,#LOW ?_printf?BYTE+03H
+0230 E4                CLR     A
+0231 F2                MOVX    @R0,A
+0232 08                INC     R0
+0233 EF                MOV     A,R7
+0234 F2                MOVX    @R0,A
+0235 120000      E     LCALL   _printf
+                                           ; SOURCE LINE # 264
+0238 7BFF              MOV     R3,#0FFH
+023A 7A00        R     MOV     R2,#HIGH ?SC_68
+023C 7900        R     MOV     R1,#LOW ?SC_68
+023E 900000      E     MOV     DPTR,#extmas+083H
+0241 E0                MOVX    A,@DPTR
+0242 FF                MOV     R7,A
+0243 7800        E     MOV     R0,#LOW ?_printf?BYTE+03H
+C51 COMPILER V9.50a   USB_MAIN                                                             04/03/2023 15:54:11 PAGE 21  
+
+0245 E4                CLR     A
+0246 F2                MOVX    @R0,A
+0247 08                INC     R0
+0248 EF                MOV     A,R7
+0249 F2                MOVX    @R0,A
+024A 120000      E     LCALL   _printf
+                                           ; SOURCE LINE # 265
+024D 7BFF              MOV     R3,#0FFH
+024F 7A00        R     MOV     R2,#HIGH ?SC_68
+0251 7900        R     MOV     R1,#LOW ?SC_68
+0253 900000      E     MOV     DPTR,#extmas+084H
+0256 E0                MOVX    A,@DPTR
+0257 FF                MOV     R7,A
+0258 7800        E     MOV     R0,#LOW ?_printf?BYTE+03H
+025A E4                CLR     A
+025B F2                MOVX    @R0,A
+025C 08                INC     R0
+025D EF                MOV     A,R7
+025E F2                MOVX    @R0,A
+025F 120000      E     LCALL   _printf
+                                           ; SOURCE LINE # 266
+0262 7BFF              MOV     R3,#0FFH
+0264 7A00        R     MOV     R2,#HIGH ?SC_68
+0266 7900        R     MOV     R1,#LOW ?SC_68
+0268 900000      E     MOV     DPTR,#extmas+085H
+026B         ?C0087:
+026B E0                MOVX    A,@DPTR
+026C FF                MOV     R7,A
+026D 7800        E     MOV     R0,#LOW ?_printf?BYTE+03H
+026F E4                CLR     A
+0270 F2                MOVX    @R0,A
+0271 08                INC     R0
+0272 EF                MOV     A,R7
+0273         ?C0090:
+                                           ; SOURCE LINE # 267
+0273 020000      R     LJMP    ?C0092
+                                           ; SOURCE LINE # 268
+0276         ?C0045:
+0276 7BFF              MOV     R3,#0FFH
+0278 7A00        R     MOV     R2,#HIGH ?SC_68
+027A 7900        R     MOV     R1,#LOW ?SC_68
+027C 900000      E     MOV     DPTR,#extmas
+027F E0                MOVX    A,@DPTR
+0280 FF                MOV     R7,A
+0281 7800        E     MOV     R0,#LOW ?_printf?BYTE+03H
+0283 E4                CLR     A
+0284 F2                MOVX    @R0,A
+0285 08                INC     R0
+0286 EF                MOV     A,R7
+0287 F2                MOVX    @R0,A
+0288 120000      E     LCALL   _printf
+                                           ; SOURCE LINE # 269
+028B 7BFF              MOV     R3,#0FFH
+028D 7A00        R     MOV     R2,#HIGH ?SC_68
+028F 7900        R     MOV     R1,#LOW ?SC_68
+0291 900000      E     MOV     DPTR,#extmas+01H
+0294 E0                MOVX    A,@DPTR
+0295 FF                MOV     R7,A
+0296 7800        E     MOV     R0,#LOW ?_printf?BYTE+03H
+0298 E4                CLR     A
+0299 F2                MOVX    @R0,A
+029A 08                INC     R0
+C51 COMPILER V9.50a   USB_MAIN                                                             04/03/2023 15:54:11 PAGE 22  
+
+029B EF                MOV     A,R7
+029C F2                MOVX    @R0,A
+029D 120000      E     LCALL   _printf
+                                           ; SOURCE LINE # 270
+02A0 7BFF              MOV     R3,#0FFH
+02A2 7A00        R     MOV     R2,#HIGH ?SC_68
+02A4 7900        R     MOV     R1,#LOW ?SC_68
+02A6 900000      E     MOV     DPTR,#extmas+02H
+02A9 E0                MOVX    A,@DPTR
+02AA FF                MOV     R7,A
+02AB 7800        E     MOV     R0,#LOW ?_printf?BYTE+03H
+02AD E4                CLR     A
+02AE F2                MOVX    @R0,A
+02AF 08                INC     R0
+02B0 EF                MOV     A,R7
+02B1 F2                MOVX    @R0,A
+02B2 120000      E     LCALL   _printf
+                                           ; SOURCE LINE # 271
+02B5 7BFF              MOV     R3,#0FFH
+02B7 7A00        R     MOV     R2,#HIGH ?SC_68
+02B9 7900        R     MOV     R1,#LOW ?SC_68
+02BB 900000      E     MOV     DPTR,#extmas+03H
+02BE E0                MOVX    A,@DPTR
+02BF FF                MOV     R7,A
+02C0 7800        E     MOV     R0,#LOW ?_printf?BYTE+03H
+02C2 E4                CLR     A
+02C3 F2                MOVX    @R0,A
+02C4 08                INC     R0
+02C5 EF                MOV     A,R7
+02C6 F2                MOVX    @R0,A
+02C7 120000      E     LCALL   _printf
+                                           ; SOURCE LINE # 272
+02CA 7BFF              MOV     R3,#0FFH
+02CC 7A00        R     MOV     R2,#HIGH ?SC_68
+02CE 7900        R     MOV     R1,#LOW ?SC_68
+02D0 900000      E     MOV     DPTR,#extmas+04H
+02D3 E0                MOVX    A,@DPTR
+02D4 FF                MOV     R7,A
+02D5 7800        E     MOV     R0,#LOW ?_printf?BYTE+03H
+02D7 E4                CLR     A
+02D8 F2                MOVX    @R0,A
+02D9 08                INC     R0
+02DA EF                MOV     A,R7
+02DB         ?C0091:
+                                           ; SOURCE LINE # 273
+02DB 8065              SJMP    ?C0092
+                                           ; SOURCE LINE # 274
+02DD         ?C0046:
+02DD 7BFF              MOV     R3,#0FFH
+02DF 7A00        R     MOV     R2,#HIGH ?SC_68
+02E1 7900        R     MOV     R1,#LOW ?SC_68
+02E3 900000      E     MOV     DPTR,#extmas+05H
+02E6 E0                MOVX    A,@DPTR
+02E7 FF                MOV     R7,A
+02E8 7800        E     MOV     R0,#LOW ?_printf?BYTE+03H
+02EA E4                CLR     A
+02EB F2                MOVX    @R0,A
+02EC 08                INC     R0
+02ED EF                MOV     A,R7
+02EE F2                MOVX    @R0,A
+02EF 120000      E     LCALL   _printf
+                                           ; SOURCE LINE # 275
+C51 COMPILER V9.50a   USB_MAIN                                                             04/03/2023 15:54:11 PAGE 23  
+
+02F2 7BFF              MOV     R3,#0FFH
+02F4 7A00        R     MOV     R2,#HIGH ?SC_68
+02F6 7900        R     MOV     R1,#LOW ?SC_68
+02F8 900000      E     MOV     DPTR,#extmas+06H
+02FB E0                MOVX    A,@DPTR
+02FC FF                MOV     R7,A
+02FD 7800        E     MOV     R0,#LOW ?_printf?BYTE+03H
+02FF E4                CLR     A
+0300 F2                MOVX    @R0,A
+0301 08                INC     R0
+0302 EF                MOV     A,R7
+0303 F2                MOVX    @R0,A
+0304 120000      E     LCALL   _printf
+                                           ; SOURCE LINE # 276
+0307 7BFF              MOV     R3,#0FFH
+0309 7A00        R     MOV     R2,#HIGH ?SC_68
+030B 7900        R     MOV     R1,#LOW ?SC_68
+030D 900000      E     MOV     DPTR,#extmas+07H
+0310 E0                MOVX    A,@DPTR
+0311 FF                MOV     R7,A
+0312 7800        E     MOV     R0,#LOW ?_printf?BYTE+03H
+0314 E4                CLR     A
+0315 F2                MOVX    @R0,A
+0316 08                INC     R0
+0317 EF                MOV     A,R7
+0318 F2                MOVX    @R0,A
+0319 120000      E     LCALL   _printf
+                                           ; SOURCE LINE # 277
+031C 7BFF              MOV     R3,#0FFH
+031E 7A00        R     MOV     R2,#HIGH ?SC_68
+0320 7900        R     MOV     R1,#LOW ?SC_68
+0322 900000      E     MOV     DPTR,#extmas+08H
+0325 E0                MOVX    A,@DPTR
+0326 FF                MOV     R7,A
+0327 7800        E     MOV     R0,#LOW ?_printf?BYTE+03H
+0329 E4                CLR     A
+032A F2                MOVX    @R0,A
+032B 08                INC     R0
+032C EF                MOV     A,R7
+032D F2                MOVX    @R0,A
+032E 120000      E     LCALL   _printf
+                                           ; SOURCE LINE # 278
+0331 7BFF              MOV     R3,#0FFH
+0333 7A00        R     MOV     R2,#HIGH ?SC_68
+0335 7900        R     MOV     R1,#LOW ?SC_68
+0337 900000      E     MOV     DPTR,#extmas+09H
+033A E0                MOVX    A,@DPTR
+033B FF                MOV     R7,A
+033C 7800        E     MOV     R0,#LOW ?_printf?BYTE+03H
+033E E4                CLR     A
+033F F2                MOVX    @R0,A
+0340 08                INC     R0
+0341 EF                MOV     A,R7
+0342         ?C0092:
+0342 F2                MOVX    @R0,A
+0343 120000      E     LCALL   _printf
+                                           ; SOURCE LINE # 279
+0346 020000      R     LJMP    ?C0031
+                                           ; SOURCE LINE # 280
+0349         ?C0047:
+0349 7F80              MOV     R7,#080H
+034B 7E25              MOV     R6,#025H
+C51 COMPILER V9.50a   USB_MAIN                                                             04/03/2023 15:54:11 PAGE 24  
+
+034D 120000      E     LCALL   _UART1_Init
+                                           ; SOURCE LINE # 281
+0350 7800        E     MOV     R0,#LOW TIMEOUT_WAIT
+0352 740A              MOV     A,#0AH
+0354 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 282
+0355 7800        E     MOV     R0,#LOW TIMEOUT_BYTE
+0357 04                INC     A
+0358 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 283
+0359 020000      R     LJMP    ?C0031
+                                           ; SOURCE LINE # 284
+035C         ?C0048:
+035C 900000      E     MOV     DPTR,#extmas+01H
+035F 7401              MOV     A,#01H
+0361 F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 285
+0362 A3                INC     DPTR
+0363 7408              MOV     A,#08H
+0365 F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 286
+0366 900000      E     MOV     DPTR,#extmas
+0369 7401              MOV     A,#01H
+036B F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 287
+036C E4                CLR     A
+036D 900000      E     MOV     DPTR,#extmas+04H
+0370 F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 288
+0371 A3                INC     DPTR
+0372 74AA              MOV     A,#0AAH
+0374 F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 289
+0375 A3                INC     DPTR
+0376 7457              MOV     A,#057H
+0378 F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 290
+0379 A3                INC     DPTR
+037A 7453              MOV     A,#053H
+037C F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 291
+037D E4                CLR     A
+037E A3                INC     DPTR
+037F F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 292
+0380 A3                INC     DPTR
+0381 749F              MOV     A,#09FH
+0383 F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 293
+0384 A3                INC     DPTR
+0385 7403              MOV     A,#03H
+                                           ; SOURCE LINE # 294
+                                           ; SOURCE LINE # 295
+0387 8061              SJMP    ?C0093
+                                           ; SOURCE LINE # 296
+0389         ?C0049:
+0389 7F80              MOV     R7,#080H
+038B 7E25              MOV     R6,#025H
+038D 120000      E     LCALL   _UART1_Init
+                                           ; SOURCE LINE # 297
+0390 900000      R     MOV     DPTR,#buf
+0393 7401              MOV     A,#01H
+C51 COMPILER V9.50a   USB_MAIN                                                             04/03/2023 15:54:11 PAGE 25  
+
+0395 F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 298
+0396 900000      E     MOV     DPTR,#extmas+03H
+0399 7409              MOV     A,#09H
+039B F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 299
+039C 7B01              MOV     R3,#01H
+039E 7A00              MOV     R2,#00H
+03A0 7D04              MOV     R5,#04H
+                                           ; SOURCE LINE # 300
+03A2 8021              SJMP    ?C0094
+                                           ; SOURCE LINE # 301
+03A4         ?C0050:
+03A4 7F80              MOV     R7,#080H
+03A6 7E25              MOV     R6,#025H
+03A8 120000      E     LCALL   _UART0_Init
+                                           ; SOURCE LINE # 302
+03AB 900000      R     MOV     DPTR,#buf
+03AE 7401              MOV     A,#01H
+03B0 F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 303
+03B1 FB                MOV     R3,A
+03B2 7A00              MOV     R2,#00H
+03B4 7D03              MOV     R5,#03H
+03B6 FF                MOV     R7,A
+                                           ; SOURCE LINE # 304
+03B7 800E              SJMP    ?C0095
+                                           ; SOURCE LINE # 305
+03B9         ?C0051:
+03B9 900000      R     MOV     DPTR,#buf
+03BC 7402              MOV     A,#02H
+03BE F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 306
+03BF 7B01              MOV     R3,#01H
+03C1 7A00              MOV     R2,#00H
+03C3 7D03              MOV     R5,#03H
+03C5         ?C0094:
+03C5 7F01              MOV     R7,#01H
+03C7         ?C0095:
+03C7 120000      R     LCALL   _Make_volkov_package
+                                           ; SOURCE LINE # 307
+03CA 020000      R     LJMP    ?C0031
+                                           ; SOURCE LINE # 308
+03CD         ?C0052:
+03CD 900000      E     MOV     DPTR,#extmas
+03D0 7403              MOV     A,#03H
+03D2 F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 309
+03D3 900000      E     MOV     DPTR,#extmas+04H
+03D6 740A              MOV     A,#0AH
+03D8 F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 310
+03D9 A3                INC     DPTR
+03DA 74FF              MOV     A,#0FFH
+03DC F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 311
+03DD 020000      R     LJMP    ?C0031
+                                           ; SOURCE LINE # 312
+03E0         ?C0053:
+03E0 900000      E     MOV     DPTR,#extmas
+03E3 7403              MOV     A,#03H
+03E5 F0                MOVX    @DPTR,A
+C51 COMPILER V9.50a   USB_MAIN                                                             04/03/2023 15:54:11 PAGE 26  
+
+                                           ; SOURCE LINE # 313
+03E6 E4                CLR     A
+03E7 900000      E     MOV     DPTR,#extmas+04H
+03EA         ?C0093:
+03EA F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 314
+03EB A3                INC     DPTR
+03EC F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 315
+03ED 020000      R     LJMP    ?C0031
+                                           ; SOURCE LINE # 316
+03F0         ?C0054:
+03F0 900000      E     MOV     DPTR,#extmas
+03F3 7402              MOV     A,#02H
+03F5 F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 317
+03F6 900000      E     MOV     DPTR,#extmas+04H
+03F9 F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 318
+03FA A3                INC     DPTR
+03FB 7458              MOV     A,#058H
+03FD F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 319
+03FE 020000      R     LJMP    ?C0031
+                                           ; SOURCE LINE # 321
+0401         ?C0055:
+0401 7BFF              MOV     R3,#0FFH
+0403 7A00        R     MOV     R2,#HIGH ?SC_133
+0405 7900        R     MOV     R1,#LOW ?SC_133
+0407 120000      E     LCALL   _printf
+                                           ; SOURCE LINE # 322
+                                           ; SOURCE LINE # 323
+040A 020000      R     LJMP    ?C0031
+             ; FUNCTION main (END)
+
+             ; FUNCTION Sysclk_Init (BEGIN)
+                                           ; SOURCE LINE # 341
+                                           ; SOURCE LINE # 342
+                                           ; SOURCE LINE # 345
+0000 43B203            ORL     OSCICN,#03H
+                                           ; SOURCE LINE # 348
+0003 E4                CLR     A
+0004 F5B9              MOV     CLKMUL,A
+                                           ; SOURCE LINE # 350
+0006 43B980            ORL     CLKMUL,#080H
+                                           ; SOURCE LINE # 351
+0009 120000      R     LCALL   Delay
+                                           ; SOURCE LINE # 352
+000C 43B9C0            ORL     CLKMUL,#0C0H
+                                           ; SOURCE LINE # 353
+000F 120000      R     LCALL   Delay
+0012         ?C0057:
+                                           ; SOURCE LINE # 354
+0012 E5B9              MOV     A,CLKMUL
+0014 30E5FB            JNB     ACC.5,?C0057
+0017         ?C0058:
+                                           ; SOURCE LINE # 355
+0017 75A903            MOV     CLKSEL,#03H
+                                           ; SOURCE LINE # 358
+001A 22                RET     
+             ; FUNCTION Sysclk_Init (END)
+
+C51 COMPILER V9.50a   USB_MAIN                                                             04/03/2023 15:54:11 PAGE 27  
+
+             ; FUNCTION Port_Init (BEGIN)
+                                           ; SOURCE LINE # 363
+                                           ; SOURCE LINE # 364
+                                           ; SOURCE LINE # 400
+0000 75A49D            MOV     P0MDOUT,#09DH
+                                           ; SOURCE LINE # 401
+0003 75A5FE            MOV     P1MDOUT,#0FEH
+                                           ; SOURCE LINE # 402
+0006 75A7FF            MOV     P3MDOUT,#0FFH
+                                           ; SOURCE LINE # 403
+0009 75AEFF            MOV     P4MDOUT,#0FFH
+                                           ; SOURCE LINE # 404
+000C 75D448            MOV     P0SKIP,#048H
+                                           ; SOURCE LINE # 405
+000F 75D5FE            MOV     P1SKIP,#0FEH
+                                           ; SOURCE LINE # 406
+0012 75D6FF            MOV     P2SKIP,#0FFH
+                                           ; SOURCE LINE # 407
+0015 75DFFF            MOV     P3SKIP,#0FFH
+                                           ; SOURCE LINE # 408
+0018 75E103            MOV     XBR0,#03H
+                                           ; SOURCE LINE # 409
+001B 75E240            MOV     XBR1,#040H
+                                           ; SOURCE LINE # 410
+001E 75E301            MOV     XBR2,#01H
+                                           ; SOURCE LINE # 411
+0021 75B0FF            MOV     P3,#0FFH
+                                           ; SOURCE LINE # 412
+0024 75C7FF            MOV     P4,#0FFH
+                                           ; SOURCE LINE # 413
+0027 22                RET     
+             ; FUNCTION Port_Init (END)
+
+             ; FUNCTION Usb0_Init (BEGIN)
+                                           ; SOURCE LINE # 427
+                                           ; SOURCE LINE # 428
+                                           ; SOURCE LINE # 429
+0000         ?C0061:
+0000 E596              MOV     A,USB0ADR
+0002 20E7FB            JB      ACC.7,?C0061
+0005         ?C0062:
+0005 759601            MOV     USB0ADR,#01H
+0008 759708            MOV     USB0DAT,#08H
+                                           ; SOURCE LINE # 432
+000B         ?C0063:
+000B E596              MOV     A,USB0ADR
+000D 20E7FB            JB      ACC.7,?C0063
+0010         ?C0064:
+0010 759607            MOV     USB0ADR,#07H
+0013 759701            MOV     USB0DAT,#01H
+                                           ; SOURCE LINE # 433
+0016         ?C0065:
+0016 E596              MOV     A,USB0ADR
+0018 20E7FB            JB      ACC.7,?C0065
+001B         ?C0066:
+001B 759609            MOV     USB0ADR,#09H
+001E E4                CLR     A
+001F F597              MOV     USB0DAT,A
+                                           ; SOURCE LINE # 434
+0021         ?C0067:
+0021 E596              MOV     A,USB0ADR
+0023 20E7FB            JB      ACC.7,?C0067
+C51 COMPILER V9.50a   USB_MAIN                                                             04/03/2023 15:54:11 PAGE 28  
+
+0026         ?C0068:
+0026 75960B            MOV     USB0ADR,#0BH
+0029 759705            MOV     USB0DAT,#05H
+                                           ; SOURCE LINE # 436
+002C 75D7E0            MOV     USB0XCN,#0E0H
+                                           ; SOURCE LINE # 437
+002F         ?C0069:
+002F E596              MOV     A,USB0ADR
+0031 20E7FB            JB      ACC.7,?C0069
+0034         ?C0070:
+0034 75960F            MOV     USB0ADR,#0FH
+0037 759780            MOV     USB0DAT,#080H
+                                           ; SOURCE LINE # 441
+003A         ?C0071:
+003A E596              MOV     A,USB0ADR
+003C 20E7FB            JB      ACC.7,?C0071
+003F         ?C0072:
+003F 759601            MOV     USB0ADR,#01H
+0042 759701            MOV     USB0DAT,#01H
+                                           ; SOURCE LINE # 442
+0045 22                RET     
+             ; FUNCTION Usb0_Init (END)
+
+             ; FUNCTION Delay (BEGIN)
+                                           ; SOURCE LINE # 453
+                                           ; SOURCE LINE # 454
+                                           ; SOURCE LINE # 456
+;---- Variable 'x' assigned to Register 'R6/R7' ----
+0000 E4                CLR     A
+0001 FF                MOV     R7,A
+0002 FE                MOV     R6,A
+0003         ?C0074:
+                                           ; SOURCE LINE # 457
+0003 0F                INC     R7
+0004 BF0001            CJNE    R7,#00H,?C0083
+0007 0E                INC     R6
+0008         ?C0083:
+0008 BE01F8            CJNE    R6,#01H,?C0074
+000B BFF4F5            CJNE    R7,#0F4H,?C0074
+                                           ; SOURCE LINE # 458
+000E         ?C0077:
+000E 22                RET     
+             ; FUNCTION Delay (END)
+
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =   1512    ----
+   CONSTANT SIZE    =    150    ----
+   XDATA SIZE       =     10    ----
+   PDATA SIZE       =      3      14
+   DATA SIZE        =   ----    ----
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =   ----    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  2 WARNING(S),  0 ERROR(S)

@@ -1,0 +1,2642 @@
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 1   
+
+
+C51 COMPILER V9.50a, COMPILATION OF MODULE VOLKOV
+OBJECT MODULE PLACED IN volkov.OBJ
+COMPILER INVOKED BY: C:\Keil\C51\BIN\C51.exe volkov.c DB OE CD INCDIR(c:\SiLabs\MCU\Inc) COMPACT
+
+line level    source
+
+   1          #include <stdio.h>
+   2          #include <c8051F340.h>                 // SFR declarations
+   3          #include "uart.h"
+   4          #include "volkov.h"
+   5          
+   6          unsigned char AddressPLC[CHNUM] =  {0,0};
+   7          unsigned char volkov_flag[CHNUM] = {0,0};
+   8          //unsigned char echo_flag[CHNUM] = {0,0};
+   9          unsigned char echo_flag[CHNUM] = {1,1};
+  10          unsigned char flag32[CHNUM] = {0,0};
+  11          unsigned char ma_sl_flag[CHNUM] = {1,1};//master/slave flag 1=master 0=slave
+  12          
+  13          unsigned char tbuf[CHNUM][TBUF_SIZE];
+  14          unsigned char rbuf[CHNUM][RBUF_SIZE];
+  15          
+  16          unsigned long t_in[CHNUM] = {0,0};
+  17          unsigned long t_out[CHNUM] = {0,0};
+  18          
+  19          unsigned long r_in[CHNUM] = {0,0};
+  20          
+  21          unsigned long r_out[CHNUM] = {0,0};
+  22          
+  23          
+  24          unsigned char ti_restart[CHNUM] = {0,0};
+  25          
+  26          unsigned char START_flag[CHNUM] = {0,0};
+  27          
+  28          unsigned char STOP_echo_flag[CHNUM] = {0,0};
+  29          
+  30          unsigned char STOP_flag[CHNUM] = {0,0};
+  31          
+  32          void VolkovEnable(unsigned char nch)
+  33          {
+  34   1       volkov_flag[nch]=1;
+  35   1      }
+  36          
+  37          void VolkovDisable(unsigned char nch)
+  38          {
+  39   1       volkov_flag[nch]=0;
+  40   1      }
+  41          
+  42          void InitVolkov(unsigned char nch)
+  43          {
+  44   1       t_in[nch] = 0;
+  45   1       t_out[nch] = 0;
+  46   1       r_in[nch] = 0;
+  47   1       r_out[nch] = 0;
+  48   1       START_flag[nch] = 0;
+  49   1       STOP_flag[nch] = 0;
+  50   1       ti_restart[nch] = 1;
+  51   1      // VolkovEnable(nch);} 
+  52   1      }
+  53          
+  54          void RX_irq(unsigned char nch)
+  55          {
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 2   
+
+  56   1        unsigned char temp;
+  57   1        RecvByte(nch, &temp);
+  58   1      //  printf("%02d: %02x\n", r_in[nch], temp);
+  59   1        if (volkov_flag[nch]==0)
+  60   1        {
+  61   2         rbuf[nch][r_in[nch] & (RBUF_SIZE-1)] = temp; //укладываем байты
+  62   2         r_in[nch]++;
+  63   2        }
+  64   1        else
+  65   1        {   //если установлен режим с эхо и это слейв, то отправляем эхо
+  66   2         if ((ma_sl_flag[nch] == 0) && (echo_flag[nch] == 1) && (ti_restart[nch] == 1)) SendByte(nch, temp);
+  67   2         if (temp == START)
+  68   2         {
+  69   3          r_in[nch] = 0; 
+  70   3          r_out[nch] = 0; 
+  71   3          START_flag[nch] = 1; 
+  72   3          STOP_echo_flag[nch] = 0;
+  73   3          STOP_flag[nch] = 0;
+  74   3         }
+  75   2         if (START_flag[nch] == 1) //пока старт не придёт, ничего не делать 
+  76   2         {
+  77   3          if (((r_in[nch] - r_out[nch]) & ~(RBUF_SIZE-1)) == 0)
+  78   3          {
+  79   4           rbuf[nch][r_in[nch] & (RBUF_SIZE-1)] = temp; //укладываем байты
+  80   4           r_in[nch]++;
+  81   4          }
+  82   3          if (temp==STOP) //уложенный байт мог оказаться последним
+  83   3          {
+  84   4           if ((ma_sl_flag[nch]==1) && (echo_flag[nch]==1)) //если контроллер в режиме мастера
+  85   4           {                                      //проверяем режим работы с эхо
+  86   5             if (STOP_echo_flag[nch]==1) 
+  87   5             {
+  88   6              START_flag[nch]=0;
+  89   6              STOP_echo_flag[nch]=0;
+  90   6              STOP_flag[nch]=1;
+  91   6             }
+  92   5             else
+  93   5             {
+  94   6              r_in[nch]=0;
+  95   6              r_out[nch]=0;
+  96   6              STOP_echo_flag[nch]=1;
+  97   6             }
+  98   5           } 
+  99   4           else //если режим работы без эхо
+ 100   4           {
+ 101   5            START_flag[nch] = 0; //просто конец приёма
+ 102   5            STOP_flag[nch] = 1;
+ 103   5           } 
+ 104   4          }
+ 105   3         } 
+ 106   2        }
+ 107   1      }
+ 108          
+ 109          void TX_irq(unsigned char nch)
+ 110          {
+ 111   1        if (t_in[nch] != t_out[nch])
+ 112   1        {
+ 113   2         SendByte(nch,tbuf[nch][t_out[nch] & (TBUF_SIZE-1)]);
+ 114   2         t_out[nch]++;
+ 115   2        }
+ 116   1        else
+ 117   1        { 
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 3   
+
+ 118   2         t_in[nch]=0;                                                 // empty transmit buffer
+ 119   2         t_out[nch]=0;
+ 120   2         ti_restart[nch]=1;
+ 121   2        }  
+ 122   1      }
+ 123          
+ 124          void wait_end_of_send(unsigned char nch)
+ 125          {
+ 126   1        ti_restart[nch]=0;
+ 127   1        TI0=1;
+ 128   1        while(ti_restart[nch]==0);
+ 129   1      }
+ 130          
+ 131          void put_char(unsigned char nch, unsigned char dat)
+ 132          {
+ 133   1              if ((dat == START) || (dat == STOP) || (dat == SHIFT))
+ 134   1              {
+ 135   2                      tbuf[nch][t_in[nch]++] = SHIFT;
+ 136   2                      if (t_in[nch] >= TBUF_SIZE) wait_end_of_send(nch);
+ 137   2                      tbuf[nch][t_in[nch]++] = dat - START;
+ 138   2                      if (t_in[nch] >= TBUF_SIZE) wait_end_of_send(nch);
+ 139   2              }
+ 140   1              else 
+ 141   1              {
+ 142   2                      tbuf[nch][t_in[nch]++] = dat;
+ 143   2                      if (t_in[nch] >= TBUF_SIZE) wait_end_of_send(nch);
+ 144   2              }
+ 145   1      }
+ 146          
+ 147          void BeginSend(unsigned char nch)
+ 148          {
+ 149   1           ti_restart[nch]=0;
+ 150   1           t_in[nch]=0;                                                                       // empty transmit buffer
+ 151   1           t_out[nch]=0;
+ 152   1           START_flag[nch] = 0;
+ 153   1           STOP_echo_flag[nch]=0;
+ 154   1           STOP_flag[nch] = 0;
+ 155   1           if (ma_sl_flag[nch]==1) //Для серверной версии посылка идёт со стартом
+ 156   1           {   
+ 157   2              tbuf[nch][t_in[nch]++]=START; 
+ 158   2              wait_end_of_send(nch);
+ 159   2           }
+ 160   1      }
+ 161          
+ 162          void FinishSend(unsigned char nch)
+ 163          {
+ 164   1          tbuf[nch][t_in[nch]++] = STOP;
+ 165   1          wait_end_of_send(nch);
+ 166   1       if ((ma_sl_flag[nch] == 1) && (echo_flag[nch] == 0))
+ 167   1       {
+ 168   2      //Для серверной версии
+ 169   2         r_in[nch] = 0; 
+ 170   2         r_out[nch] = 0; 
+ 171   2         START_flag[nch] = 1; 
+ 172   2         STOP_flag[nch] = 0;
+ 173   2      //делаем имитацию того, что уже получен старт, так как ответ будет без старта
+ 174   2       }
+ 175   1      }   
+ 176          
+ 177          unsigned char get_t_in(unsigned char nch)
+ 178          {
+ 179   1       return(t_in[nch]);
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 4   
+
+ 180   1      }
+ 181          
+ 182          void volkovsend(unsigned char nch, unsigned char *curbuf, unsigned long cursize)
+ 183          {
+ 184   1              unsigned char chksum;
+ 185   1              unsigned long i, j, tmp;
+ 186   1      
+ 187   1        if (volkov_flag[nch]==0)
+ 188   1        {
+ 189   2              for (i = 0; i < cursize; i++)
+ 190   2              {
+ 191   3               com_putchar(nch, curbuf[i]);
+ 192   3              }
+ 193   2        }
+ 194   1        else
+ 195   1        {
+ 196   2      // Clear transmit interrupt and buffer
+ 197   2              BeginSend(nch);
+ 198   2              chksum = AddressPLC[nch];
+ 199   2              put_char(nch, chksum);
+ 200   2              for (i = 0; i < cursize; i++)
+ 201   2              {
+ 202   3               chksum^=curbuf[i];
+ 203   3               put_char(nch, curbuf[i]);
+ 204   3              }
+ 205   2           if (flag32[nch]==1)
+ 206   2           {
+ 207   3              if ((chksum==START)||(chksum==STOP)||(chksum==SHIFT)) tmp=28-get_t_in(nch); else tmp=29-get_t_in(n
+             -ch);
+ 208   3              for(j=0;j<tmp;j++) put_char(nch, 0);
+ 209   3           }   
+ 210   2              put_char(nch, chksum);
+ 211   2              FinishSend(nch);
+ 212   2        }
+ 213   1      }
+ 214          
+ 215          long int volkovread(unsigned char nch, unsigned char *curbuf, unsigned long cursize)//распаковка принятого
+             - массива
+ 216          {
+ 217   1              unsigned char chksum=0, m;
+ 218   1              unsigned long i, j, k;
+ 219   1        if (volkov_flag[nch]==0)
+ 220   1        {
+ 221   2              k=0;
+ 222   2              j=r_in[nch];
+ 223   2              r_in[nch]=0;
+ 224   2              for (i = 0; i < j; i++)
+ 225   2              {
+ 226   3               curbuf[k]=rbuf[nch][i];
+ 227   3               k++;
+ 228   3               if (k>=cursize) return(-2);                                    // small output buffer
+ 229   3              }
+ 230   2        }
+ 231   1        else
+ 232   1        {
+ 233   2              if (STOP_flag[nch]==0) return(-1);                              // read is not complite
+ 234   2              STOP_flag[nch]=0;
+ 235   2              j=r_in[nch];
+ 236   2              r_in[nch]=0;
+ 237   2              i=0;
+ 238   2              if (ma_sl_flag[nch]==0) if (rbuf[nch][i++]!=START) return(-3);                  // START not found
+ 239   2              if (rbuf[nch][i]!=SHIFT) m=rbuf[nch][i]; else m=rbuf[nch][++i]+START;
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 5   
+
+ 240   2              i++;
+ 241   2              if (m!=AddressPLC[nch]) return(-4);             // illegal Address
+ 242   2              chksum=m;
+ 243   2              k=0;
+ 244   2              do
+ 245   2              {
+ 246   3               if (rbuf[nch][i]!=SHIFT) m=rbuf[nch][i]; else m=rbuf[nch][++i]+START;
+ 247   3               i++;
+ 248   3               chksum^=m;
+ 249   3               curbuf[k]=m;
+ 250   3               if (k>cursize) return(-2);                                     // small output buffer
+ 251   3               k++;
+ 252   3              } while (i<(j-1));
+ 253   2              if (chksum==0) k--; else return(-5);                                    // illegal checksum
+ 254   2        }     
+ 255   1              return(k);
+ 256   1      }
+ 257          
+ 258          unsigned char com_read_ready(unsigned char nch)
+ 259          {
+ 260   1       if (volkov_flag[nch]==0)
+ 261   1       {
+ 262   2        if (com_rbuflen(nch)>0) return 1; else return 0;
+ 263   2       }
+ 264   1       else
+ 265   1       {
+ 266   2        return STOP_flag[nch];
+ 267   2       }
+ 268   1      }
+ 269          unsigned char get_live_flag(unsigned char nch) {return STOP_echo_flag[nch];}
+ 270          unsigned char com_tbuflen (unsigned char nch) {return (t_in[nch] - t_out[nch]);}
+ 271          unsigned char com_rbuflen (unsigned char nch) {return (r_in[nch] - r_out[nch]);}
+ 272          
+ 273          void com_putchar(unsigned char nch, unsigned char c)
+ 274          {
+ 275   1        tbuf[nch][t_in[nch]++] = c;
+ 276   1        wait_end_of_send(nch);
+ 277   1      }
+ 278          
+ 279          unsigned char com_getchar(unsigned char nch)
+ 280          {
+ 281   1       return(rbuf[nch][(r_out[nch]++) & (RBUF_SIZE - 1)]);
+ 282   1      }
+ 283          
+ 284          void Set_adr_PLC(unsigned char nch, unsigned char adr)
+ 285          {
+ 286   1       AddressPLC[nch]=adr;
+ 287   1      }
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 6   
+
+ASSEMBLY LISTING OF GENERATED OBJECT CODE
+
+
+             ; FUNCTION _VolkovEnable (BEGIN)
+                                           ; SOURCE LINE # 32
+;---- Variable 'nch' assigned to Register 'R7' ----
+                                           ; SOURCE LINE # 33
+                                           ; SOURCE LINE # 34
+0000 7400        R     MOV     A,#LOW volkov_flag
+0002 2F                ADD     A,R7
+0003 F8                MOV     R0,A
+0004 7401              MOV     A,#01H
+0006 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 35
+0007 22                RET     
+             ; FUNCTION _VolkovEnable (END)
+
+             ; FUNCTION _VolkovDisable (BEGIN)
+                                           ; SOURCE LINE # 37
+;---- Variable 'nch' assigned to Register 'R7' ----
+                                           ; SOURCE LINE # 38
+                                           ; SOURCE LINE # 39
+0000 7400        R     MOV     A,#LOW volkov_flag
+0002 2F                ADD     A,R7
+0003 F8                MOV     R0,A
+0004 E4                CLR     A
+0005 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 40
+0006 22                RET     
+             ; FUNCTION _VolkovDisable (END)
+
+             ; FUNCTION _InitVolkov (BEGIN)
+                                           ; SOURCE LINE # 42
+;---- Variable 'nch' assigned to Register 'R3' ----
+0000 AB07              MOV     R3,AR7
+                                           ; SOURCE LINE # 43
+                                           ; SOURCE LINE # 44
+0002 EB                MOV     A,R3
+0003 25E0              ADD     A,ACC
+0005 25E0              ADD     A,ACC
+0007 2400        R     ADD     A,#LOW t_in
+0009 F8                MOV     R0,A
+000A 120000      E     LCALL   ?C?LSTKPDATA
+000D 00                DB      00H
+000E 00                DB      00H
+000F 00                DB      00H
+0010 00                DB      00H
+                                           ; SOURCE LINE # 45
+0011 EB                MOV     A,R3
+0012 25E0              ADD     A,ACC
+0014 25E0              ADD     A,ACC
+0016 2400        R     ADD     A,#LOW t_out
+0018 F8                MOV     R0,A
+0019 120000      E     LCALL   ?C?LSTKPDATA
+001C 00                DB      00H
+001D 00                DB      00H
+001E 00                DB      00H
+001F 00                DB      00H
+                                           ; SOURCE LINE # 46
+0020 EB                MOV     A,R3
+0021 25E0              ADD     A,ACC
+0023 25E0              ADD     A,ACC
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 7   
+
+0025 2400        R     ADD     A,#LOW r_in
+0027 F8                MOV     R0,A
+0028 120000      E     LCALL   ?C?LSTKPDATA
+002B 00                DB      00H
+002C 00                DB      00H
+002D 00                DB      00H
+002E 00                DB      00H
+                                           ; SOURCE LINE # 47
+002F EB                MOV     A,R3
+0030 25E0              ADD     A,ACC
+0032 25E0              ADD     A,ACC
+0034 2400        R     ADD     A,#LOW r_out
+0036 F8                MOV     R0,A
+0037 120000      E     LCALL   ?C?LSTKPDATA
+003A 00                DB      00H
+003B 00                DB      00H
+003C 00                DB      00H
+003D 00                DB      00H
+                                           ; SOURCE LINE # 48
+003E 7400        R     MOV     A,#LOW START_flag
+0040 2B                ADD     A,R3
+0041 F8                MOV     R0,A
+0042 E4                CLR     A
+0043 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 49
+0044 7400        R     MOV     A,#LOW STOP_flag
+0046 2B                ADD     A,R3
+0047 F8                MOV     R0,A
+0048 E4                CLR     A
+0049 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 50
+004A 7400        R     MOV     A,#LOW ti_restart
+004C 2B                ADD     A,R3
+004D F8                MOV     R0,A
+004E 7401              MOV     A,#01H
+0050 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 52
+0051 22                RET     
+             ; FUNCTION _InitVolkov (END)
+
+             ; FUNCTION _RX_irq (BEGIN)
+                                           ; SOURCE LINE # 54
+0000 7800        R     MOV     R0,#LOW nch
+0002 EF                MOV     A,R7
+0003 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 55
+                                           ; SOURCE LINE # 57
+0004 7BFE              MOV     R3,#0FEH
+0006 7A00        R     MOV     R2,#HIGH temp
+0008 7900        R     MOV     R1,#LOW temp
+000A 120000      E     LCALL   _RecvByte
+                                           ; SOURCE LINE # 59
+000D 7800        R     MOV     R0,#LOW nch
+000F E2                MOVX    A,@R0
+0010 FB                MOV     R3,A
+0011 2400        R     ADD     A,#LOW volkov_flag
+0013 F8                MOV     R0,A
+0014 E2                MOVX    A,@R0
+0015 704A              JNZ     ?C0004
+                                           ; SOURCE LINE # 60
+                                           ; SOURCE LINE # 61
+0017 7800        R     MOV     R0,#LOW temp
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 8   
+
+0019 E2                MOVX    A,@R0
+001A FA                MOV     R2,A
+001B EB                MOV     A,R3
+001C 25E0              ADD     A,ACC
+001E 25E0              ADD     A,ACC
+0020 2400        R     ADD     A,#LOW r_in
+0022 F8                MOV     R0,A
+0023 08                INC     R0
+0024 08                INC     R0
+0025 08                INC     R0
+0026 E2                MOVX    A,@R0
+0027 541F              ANL     A,#01FH
+0029 FF                MOV     R7,A
+002A EB                MOV     A,R3
+002B C4                SWAP    A
+002C 33                RLC     A
+002D 54E0              ANL     A,#0E0H
+002F 2400        R     ADD     A,#LOW rbuf
+0031 2F                ADD     A,R7
+0032 F8                MOV     R0,A
+0033 EA                MOV     A,R2
+0034 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 62
+0035 7800        R     MOV     R0,#LOW nch
+0037 E2                MOVX    A,@R0
+0038 FB                MOV     R3,A
+0039 25E0              ADD     A,ACC
+003B 25E0              ADD     A,ACC
+003D 2400        R     ADD     A,#LOW r_in
+003F F8                MOV     R0,A
+0040 E2                MOVX    A,@R0
+0041 FC                MOV     R4,A
+0042 08                INC     R0
+0043 E2                MOVX    A,@R0
+0044 FD                MOV     R5,A
+0045 08                INC     R0
+0046 E2                MOVX    A,@R0
+0047 FE                MOV     R6,A
+0048 08                INC     R0
+0049 E2                MOVX    A,@R0
+004A 2401              ADD     A,#01H
+004C FF                MOV     R7,A
+004D E4                CLR     A
+004E 3E                ADDC    A,R6
+004F FE                MOV     R6,A
+0050 E4                CLR     A
+0051 3D                ADDC    A,R5
+0052 FD                MOV     R5,A
+0053 E4                CLR     A
+0054 3C                ADDC    A,R4
+0055 FC                MOV     R4,A
+0056 EB                MOV     A,R3
+0057 25E0              ADD     A,ACC
+0059 25E0              ADD     A,ACC
+005B 2400        R     ADD     A,#LOW r_in
+005D F8                MOV     R0,A
+005E 020000      E     LJMP    ?C?LSTPDATA
+                                           ; SOURCE LINE # 63
+0061         ?C0004:
+                                           ; SOURCE LINE # 65
+                                           ; SOURCE LINE # 66
+0061 7800        R     MOV     R0,#LOW nch
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 9   
+
+0063 E2                MOVX    A,@R0
+0064 FF                MOV     R7,A
+0065 2400        R     ADD     A,#LOW ma_sl_flag
+0067 F8                MOV     R0,A
+0068 E2                MOVX    A,@R0
+0069 701A              JNZ     ?C0006
+006B 7400        R     MOV     A,#LOW echo_flag
+006D 2F                ADD     A,R7
+006E F8                MOV     R0,A
+006F E2                MOVX    A,@R0
+0070 B40112            CJNE    A,#01H,?C0006
+0073 7800        R     MOV     R0,#LOW nch
+0075 E2                MOVX    A,@R0
+0076 FF                MOV     R7,A
+0077 2400        R     ADD     A,#LOW ti_restart
+0079 F8                MOV     R0,A
+007A E2                MOVX    A,@R0
+007B B40107            CJNE    A,#01H,?C0006
+007E 7800        R     MOV     R0,#LOW temp
+0080 E2                MOVX    A,@R0
+0081 FD                MOV     R5,A
+0082 120000      E     LCALL   _SendByte
+0085         ?C0006:
+                                           ; SOURCE LINE # 67
+0085 7800        R     MOV     R0,#LOW temp
+0087 E2                MOVX    A,@R0
+0088 64AA              XRL     A,#0AAH
+008A 7036              JNZ     ?C0007
+                                           ; SOURCE LINE # 68
+                                           ; SOURCE LINE # 69
+008C 18                DEC     R0
+008D E2                MOVX    A,@R0
+008E FB                MOV     R3,A
+008F 25E0              ADD     A,ACC
+0091 25E0              ADD     A,ACC
+0093 2400        R     ADD     A,#LOW r_in
+0095 F8                MOV     R0,A
+0096 120000      E     LCALL   ?C?LSTKPDATA
+0099 00                DB      00H
+009A 00                DB      00H
+009B 00                DB      00H
+009C 00                DB      00H
+                                           ; SOURCE LINE # 70
+009D EB                MOV     A,R3
+009E 25E0              ADD     A,ACC
+00A0 25E0              ADD     A,ACC
+00A2 2400        R     ADD     A,#LOW r_out
+00A4 F8                MOV     R0,A
+00A5 120000      E     LCALL   ?C?LSTKPDATA
+00A8 00                DB      00H
+00A9 00                DB      00H
+00AA 00                DB      00H
+00AB 00                DB      00H
+                                           ; SOURCE LINE # 71
+00AC 7800        R     MOV     R0,#LOW nch
+00AE E2                MOVX    A,@R0
+00AF FF                MOV     R7,A
+00B0 2400        R     ADD     A,#LOW START_flag
+00B2 F8                MOV     R0,A
+00B3 7401              MOV     A,#01H
+00B5 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 72
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 10  
+
+00B6 7400        R     MOV     A,#LOW STOP_echo_flag
+00B8 2F                ADD     A,R7
+00B9 F8                MOV     R0,A
+00BA E4                CLR     A
+00BB F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 73
+00BC 7400        R     MOV     A,#LOW STOP_flag
+00BE 2F                ADD     A,R7
+00BF F8                MOV     R0,A
+00C0 E4                CLR     A
+00C1 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 74
+00C2         ?C0007:
+                                           ; SOURCE LINE # 75
+00C2 7800        R     MOV     R0,#LOW nch
+00C4 E2                MOVX    A,@R0
+00C5 FF                MOV     R7,A
+00C6 2400        R     ADD     A,#LOW START_flag
+00C8 F8                MOV     R0,A
+00C9 E2                MOVX    A,@R0
+00CA 6401              XRL     A,#01H
+00CC 6003              JZ      $ + 5H
+00CE 020000      R     LJMP    ?C0015
+                                           ; SOURCE LINE # 76
+                                           ; SOURCE LINE # 77
+00D1 EF                MOV     A,R7
+00D2 25E0              ADD     A,ACC
+00D4 25E0              ADD     A,ACC
+00D6 2400        R     ADD     A,#LOW r_out
+00D8 F8                MOV     R0,A
+00D9 E2                MOVX    A,@R0
+00DA FB                MOV     R3,A
+00DB 08                INC     R0
+00DC E2                MOVX    A,@R0
+00DD F9                MOV     R1,A
+00DE 08                INC     R0
+00DF E2                MOVX    A,@R0
+00E0 FA                MOV     R2,A
+00E1 08                INC     R0
+00E2 E2                MOVX    A,@R0
+00E3 CB                XCH     A,R3
+00E4 F8                MOV     R0,A
+00E5 C000              PUSH    AR0
+00E7 7800        R     MOV     R0,#LOW nch
+00E9 E2                MOVX    A,@R0
+00EA 25E0              ADD     A,ACC
+00EC 25E0              ADD     A,ACC
+00EE 2400        R     ADD     A,#LOW r_in
+00F0 F8                MOV     R0,A
+00F1 E2                MOVX    A,@R0
+00F2 FC                MOV     R4,A
+00F3 08                INC     R0
+00F4 E2                MOVX    A,@R0
+00F5 FD                MOV     R5,A
+00F6 08                INC     R0
+00F7 E2                MOVX    A,@R0
+00F8 FE                MOV     R6,A
+00F9 08                INC     R0
+00FA E2                MOVX    A,@R0
+00FB D000              POP     AR0
+00FD C3                CLR     C
+00FE 9B                SUBB    A,R3
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 11  
+
+00FF FF                MOV     R7,A
+0100 EE                MOV     A,R6
+0101 9A                SUBB    A,R2
+0102 FE                MOV     R6,A
+0103 ED                MOV     A,R5
+0104 99                SUBB    A,R1
+0105 FD                MOV     R5,A
+0106 EC                MOV     A,R4
+0107 98                SUBB    A,R0
+0108 FC                MOV     R4,A
+0109 EF                MOV     A,R7
+010A 54E0              ANL     A,#0E0H
+010C FF                MOV     R7,A
+010D E4                CLR     A
+010E FB                MOV     R3,A
+010F FA                MOV     R2,A
+0110 F9                MOV     R1,A
+0111 F8                MOV     R0,A
+0112 C3                CLR     C
+0113 120000      E     LCALL   ?C?ULCMP
+0116 704C              JNZ     ?C0009
+                                           ; SOURCE LINE # 78
+                                           ; SOURCE LINE # 79
+0118 7800        R     MOV     R0,#LOW temp
+011A E2                MOVX    A,@R0
+011B FB                MOV     R3,A
+011C 18                DEC     R0
+011D E2                MOVX    A,@R0
+011E FA                MOV     R2,A
+011F 25E0              ADD     A,ACC
+0121 25E0              ADD     A,ACC
+0123 2400        R     ADD     A,#LOW r_in
+0125 F8                MOV     R0,A
+0126 08                INC     R0
+0127 08                INC     R0
+0128 08                INC     R0
+0129 E2                MOVX    A,@R0
+012A 541F              ANL     A,#01FH
+012C FF                MOV     R7,A
+012D EA                MOV     A,R2
+012E C4                SWAP    A
+012F 33                RLC     A
+0130 54E0              ANL     A,#0E0H
+0132 2400        R     ADD     A,#LOW rbuf
+0134 2F                ADD     A,R7
+0135 F8                MOV     R0,A
+0136 EB                MOV     A,R3
+0137 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 80
+0138 7800        R     MOV     R0,#LOW nch
+013A E2                MOVX    A,@R0
+013B FB                MOV     R3,A
+013C 25E0              ADD     A,ACC
+013E 25E0              ADD     A,ACC
+0140 2400        R     ADD     A,#LOW r_in
+0142 F8                MOV     R0,A
+0143 E2                MOVX    A,@R0
+0144 FC                MOV     R4,A
+0145 08                INC     R0
+0146 E2                MOVX    A,@R0
+0147 FD                MOV     R5,A
+0148 08                INC     R0
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 12  
+
+0149 E2                MOVX    A,@R0
+014A FE                MOV     R6,A
+014B 08                INC     R0
+014C E2                MOVX    A,@R0
+014D 2401              ADD     A,#01H
+014F FF                MOV     R7,A
+0150 E4                CLR     A
+0151 3E                ADDC    A,R6
+0152 FE                MOV     R6,A
+0153 E4                CLR     A
+0154 3D                ADDC    A,R5
+0155 FD                MOV     R5,A
+0156 E4                CLR     A
+0157 3C                ADDC    A,R4
+0158 FC                MOV     R4,A
+0159 EB                MOV     A,R3
+015A 25E0              ADD     A,ACC
+015C 25E0              ADD     A,ACC
+015E 2400        R     ADD     A,#LOW r_in
+0160 F8                MOV     R0,A
+0161 120000      E     LCALL   ?C?LSTPDATA
+                                           ; SOURCE LINE # 81
+0164         ?C0009:
+                                           ; SOURCE LINE # 82
+0164 7800        R     MOV     R0,#LOW temp
+0166 E2                MOVX    A,@R0
+0167 64AB              XRL     A,#0ABH
+0169 7067              JNZ     ?C0015
+                                           ; SOURCE LINE # 83
+                                           ; SOURCE LINE # 84
+016B 18                DEC     R0
+016C E2                MOVX    A,@R0
+016D FF                MOV     R7,A
+016E 2400        R     ADD     A,#LOW ma_sl_flag
+0170 F8                MOV     R0,A
+0171 E2                MOVX    A,@R0
+0172 6401              XRL     A,#01H
+0174 704C              JNZ     ?C0011
+0176 7400        R     MOV     A,#LOW echo_flag
+0178 2F                ADD     A,R7
+0179 F8                MOV     R0,A
+017A E2                MOVX    A,@R0
+017B 6401              XRL     A,#01H
+017D 7043              JNZ     ?C0011
+                                           ; SOURCE LINE # 85
+                                           ; SOURCE LINE # 86
+017F 7800        R     MOV     R0,#LOW nch
+0181 E2                MOVX    A,@R0
+0182 FB                MOV     R3,A
+0183 2400        R     ADD     A,#LOW STOP_echo_flag
+0185 F8                MOV     R0,A
+0186 E2                MOVX    A,@R0
+0187 7800        R     MOV     R0,#LOW nch
+0189 B40112            CJNE    A,#01H,?C0012
+                                           ; SOURCE LINE # 87
+                                           ; SOURCE LINE # 88
+018C E2                MOVX    A,@R0
+018D FF                MOV     R7,A
+018E 2400        R     ADD     A,#LOW START_flag
+0190 F8                MOV     R0,A
+0191 E4                CLR     A
+0192 F2                MOVX    @R0,A
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 13  
+
+                                           ; SOURCE LINE # 89
+0193 7400        R     MOV     A,#LOW STOP_echo_flag
+0195 2F                ADD     A,R7
+0196 F8                MOV     R0,A
+0197 E4                CLR     A
+0198 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 90
+0199 7400        R     MOV     A,#LOW STOP_flag
+019B 2F                ADD     A,R7
+                                           ; SOURCE LINE # 91
+019C 8030              SJMP    ?C0083
+019E         ?C0012:
+                                           ; SOURCE LINE # 93
+                                           ; SOURCE LINE # 94
+019E E2                MOVX    A,@R0
+019F FA                MOV     R2,A
+01A0 25E0              ADD     A,ACC
+01A2 25E0              ADD     A,ACC
+01A4 2400        R     ADD     A,#LOW r_in
+01A6 F8                MOV     R0,A
+01A7 120000      E     LCALL   ?C?LSTKPDATA
+01AA 00                DB      00H
+01AB 00                DB      00H
+01AC 00                DB      00H
+01AD 00                DB      00H
+                                           ; SOURCE LINE # 95
+01AE EA                MOV     A,R2
+01AF 25E0              ADD     A,ACC
+01B1 25E0              ADD     A,ACC
+01B3 2400        R     ADD     A,#LOW r_out
+01B5 F8                MOV     R0,A
+01B6 120000      E     LCALL   ?C?LSTKPDATA
+01B9 00                DB      00H
+01BA 00                DB      00H
+01BB 00                DB      00H
+01BC 00                DB      00H
+                                           ; SOURCE LINE # 96
+01BD 7400        R     MOV     A,#LOW STOP_echo_flag
+01BF 2B                ADD     A,R3
+01C0         ?C0082:
+                                           ; SOURCE LINE # 97
+                                           ; SOURCE LINE # 98
+01C0 800C              SJMP    ?C0083
+01C2         ?C0011:
+                                           ; SOURCE LINE # 100
+                                           ; SOURCE LINE # 101
+01C2 7800        R     MOV     R0,#LOW nch
+01C4 E2                MOVX    A,@R0
+01C5 FF                MOV     R7,A
+01C6 2400        R     ADD     A,#LOW START_flag
+01C8 F8                MOV     R0,A
+01C9 E4                CLR     A
+01CA F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 102
+01CB 7400        R     MOV     A,#LOW STOP_flag
+01CD 2F                ADD     A,R7
+01CE         ?C0083:
+01CE F8                MOV     R0,A
+01CF 7401              MOV     A,#01H
+01D1 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 103
+                                           ; SOURCE LINE # 104
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 14  
+
+                                           ; SOURCE LINE # 105
+                                           ; SOURCE LINE # 106
+                                           ; SOURCE LINE # 107
+01D2         ?C0015:
+01D2 22                RET     
+             ; FUNCTION _RX_irq (END)
+
+             ; FUNCTION _TX_irq (BEGIN)
+                                           ; SOURCE LINE # 109
+0000 7800        R     MOV     R0,#LOW nch
+0002 EF                MOV     A,R7
+0003 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 110
+                                           ; SOURCE LINE # 111
+0004 25E0              ADD     A,ACC
+0006 25E0              ADD     A,ACC
+0008 2400        R     ADD     A,#LOW t_out
+000A F8                MOV     R0,A
+000B E2                MOVX    A,@R0
+000C FB                MOV     R3,A
+000D 08                INC     R0
+000E E2                MOVX    A,@R0
+000F F9                MOV     R1,A
+0010 08                INC     R0
+0011 E2                MOVX    A,@R0
+0012 FA                MOV     R2,A
+0013 08                INC     R0
+0014 E2                MOVX    A,@R0
+0015 CB                XCH     A,R3
+0016 F8                MOV     R0,A
+0017 C000              PUSH    AR0
+0019 EF                MOV     A,R7
+001A 25E0              ADD     A,ACC
+001C 25E0              ADD     A,ACC
+001E 2400        R     ADD     A,#LOW t_in
+0020 F8                MOV     R0,A
+0021 E2                MOVX    A,@R0
+0022 FC                MOV     R4,A
+0023 08                INC     R0
+0024 E2                MOVX    A,@R0
+0025 FD                MOV     R5,A
+0026 08                INC     R0
+0027 E2                MOVX    A,@R0
+0028 FE                MOV     R6,A
+0029 08                INC     R0
+002A E2                MOVX    A,@R0
+002B FF                MOV     R7,A
+002C D000              POP     AR0
+002E C3                CLR     C
+002F 120000      E     LCALL   ?C?ULCMP
+0032 7800        R     MOV     R0,#LOW nch
+0034 604E              JZ      ?C0016
+                                           ; SOURCE LINE # 112
+                                           ; SOURCE LINE # 113
+0036 E2                MOVX    A,@R0
+0037 FB                MOV     R3,A
+0038 25E0              ADD     A,ACC
+003A 25E0              ADD     A,ACC
+003C 2400        R     ADD     A,#LOW t_out
+003E F8                MOV     R0,A
+003F 08                INC     R0
+0040 08                INC     R0
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 15  
+
+0041 08                INC     R0
+0042 E2                MOVX    A,@R0
+0043 541F              ANL     A,#01FH
+0045 FF                MOV     R7,A
+0046 EB                MOV     A,R3
+0047 C4                SWAP    A
+0048 33                RLC     A
+0049 54E0              ANL     A,#0E0H
+004B 2400        R     ADD     A,#LOW tbuf
+004D 2F                ADD     A,R7
+004E F8                MOV     R0,A
+004F E2                MOVX    A,@R0
+0050 FD                MOV     R5,A
+0051 7800        R     MOV     R0,#LOW nch
+0053 E2                MOVX    A,@R0
+0054 FF                MOV     R7,A
+0055 120000      E     LCALL   _SendByte
+                                           ; SOURCE LINE # 114
+0058 7800        R     MOV     R0,#LOW nch
+005A E2                MOVX    A,@R0
+005B FB                MOV     R3,A
+005C 25E0              ADD     A,ACC
+005E 25E0              ADD     A,ACC
+0060 2400        R     ADD     A,#LOW t_out
+0062 F8                MOV     R0,A
+0063 E2                MOVX    A,@R0
+0064 FC                MOV     R4,A
+0065 08                INC     R0
+0066 E2                MOVX    A,@R0
+0067 FD                MOV     R5,A
+0068 08                INC     R0
+0069 E2                MOVX    A,@R0
+006A FE                MOV     R6,A
+006B 08                INC     R0
+006C E2                MOVX    A,@R0
+006D 2401              ADD     A,#01H
+006F FF                MOV     R7,A
+0070 E4                CLR     A
+0071 3E                ADDC    A,R6
+0072 FE                MOV     R6,A
+0073 E4                CLR     A
+0074 3D                ADDC    A,R5
+0075 FD                MOV     R5,A
+0076 E4                CLR     A
+0077 3C                ADDC    A,R4
+0078 FC                MOV     R4,A
+0079 EB                MOV     A,R3
+007A 25E0              ADD     A,ACC
+007C 25E0              ADD     A,ACC
+007E 2400        R     ADD     A,#LOW t_out
+0080 F8                MOV     R0,A
+0081 020000      E     LJMP    ?C?LSTPDATA
+                                           ; SOURCE LINE # 115
+0084         ?C0016:
+                                           ; SOURCE LINE # 117
+                                           ; SOURCE LINE # 118
+0084 E2                MOVX    A,@R0
+0085 FB                MOV     R3,A
+0086 25E0              ADD     A,ACC
+0088 25E0              ADD     A,ACC
+008A 2400        R     ADD     A,#LOW t_in
+008C F8                MOV     R0,A
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 16  
+
+008D 120000      E     LCALL   ?C?LSTKPDATA
+0090 00                DB      00H
+0091 00                DB      00H
+0092 00                DB      00H
+0093 00                DB      00H
+                                           ; SOURCE LINE # 119
+0094 EB                MOV     A,R3
+0095 25E0              ADD     A,ACC
+0097 25E0              ADD     A,ACC
+0099 2400        R     ADD     A,#LOW t_out
+009B F8                MOV     R0,A
+009C 120000      E     LCALL   ?C?LSTKPDATA
+009F 00                DB      00H
+00A0 00                DB      00H
+00A1 00                DB      00H
+00A2 00                DB      00H
+                                           ; SOURCE LINE # 120
+00A3 7800        R     MOV     R0,#LOW nch
+00A5 E2                MOVX    A,@R0
+00A6 2400        R     ADD     A,#LOW ti_restart
+00A8 F8                MOV     R0,A
+00A9 7401              MOV     A,#01H
+00AB F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 121
+                                           ; SOURCE LINE # 122
+00AC         ?C0018:
+00AC 22                RET     
+             ; FUNCTION _TX_irq (END)
+
+             ; FUNCTION _wait_end_of_send (BEGIN)
+                                           ; SOURCE LINE # 124
+;---- Variable 'nch' assigned to Register 'R7' ----
+                                           ; SOURCE LINE # 125
+                                           ; SOURCE LINE # 126
+0000 7400        R     MOV     A,#LOW ti_restart
+0002 2F                ADD     A,R7
+0003 F8                MOV     R0,A
+0004 E4                CLR     A
+0005 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 127
+0006 D299              SETB    TI0
+0008         ?C0019:
+                                           ; SOURCE LINE # 128
+0008 7400        R     MOV     A,#LOW ti_restart
+000A 2F                ADD     A,R7
+000B F8                MOV     R0,A
+000C E2                MOVX    A,@R0
+000D 60F9              JZ      ?C0019
+000F         ?C0020:
+                                           ; SOURCE LINE # 129
+000F         ?C0021:
+000F 22                RET     
+             ; FUNCTION _wait_end_of_send (END)
+
+             ; FUNCTION _put_char (BEGIN)
+                                           ; SOURCE LINE # 131
+0000 7800        R     MOV     R0,#LOW nch
+0002 EF                MOV     A,R7
+0003 F2                MOVX    @R0,A
+0004 08                INC     R0
+0005 ED                MOV     A,R5
+0006 F2                MOVX    @R0,A
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 17  
+
+                                           ; SOURCE LINE # 132
+                                           ; SOURCE LINE # 133
+0007 64AA              XRL     A,#0AAH
+0009 600E              JZ      ?C0023
+000B E2                MOVX    A,@R0
+000C FF                MOV     R7,A
+000D 64AB              XRL     A,#0ABH
+000F 6008              JZ      ?C0023
+0011 EF                MOV     A,R7
+0012 64AC              XRL     A,#0ACH
+0014 6003              JZ      $ + 5H
+0016 020000      R     LJMP    ?C0022
+0019         ?C0023:
+                                           ; SOURCE LINE # 134
+                                           ; SOURCE LINE # 135
+0019 7800        R     MOV     R0,#LOW nch
+001B E2                MOVX    A,@R0
+001C FB                MOV     R3,A
+001D 25E0              ADD     A,ACC
+001F 25E0              ADD     A,ACC
+0021 2400        R     ADD     A,#LOW t_in
+0023 F8                MOV     R0,A
+0024 120000      E     LCALL   ?C?LLDIPDATA1
+0027 EB                MOV     A,R3
+0028 C4                SWAP    A
+0029 33                RLC     A
+002A 54E0              ANL     A,#0E0H
+002C 2400        R     ADD     A,#LOW tbuf
+002E 2F                ADD     A,R7
+002F F8                MOV     R0,A
+0030 74AC              MOV     A,#0ACH
+0032 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 136
+0033 7800        R     MOV     R0,#LOW nch
+0035 E2                MOVX    A,@R0
+0036 25E0              ADD     A,ACC
+0038 25E0              ADD     A,ACC
+003A 2400        R     ADD     A,#LOW t_in
+003C F8                MOV     R0,A
+003D E2                MOVX    A,@R0
+003E FC                MOV     R4,A
+003F 08                INC     R0
+0040 E2                MOVX    A,@R0
+0041 FD                MOV     R5,A
+0042 08                INC     R0
+0043 E2                MOVX    A,@R0
+0044 FE                MOV     R6,A
+0045 08                INC     R0
+0046 E2                MOVX    A,@R0
+0047 FF                MOV     R7,A
+0048 E4                CLR     A
+0049 7B20              MOV     R3,#020H
+004B FA                MOV     R2,A
+004C F9                MOV     R1,A
+004D F8                MOV     R0,A
+004E D3                SETB    C
+004F 120000      E     LCALL   ?C?ULCMP
+0052 5007              JNC     ?C0024
+0054 7800        R     MOV     R0,#LOW nch
+0056 E2                MOVX    A,@R0
+0057 FF                MOV     R7,A
+0058 120000      R     LCALL   _wait_end_of_send
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 18  
+
+005B         ?C0024:
+                                           ; SOURCE LINE # 137
+005B 7800        R     MOV     R0,#LOW dat
+005D E2                MOVX    A,@R0
+005E 2456              ADD     A,#056H
+0060 FB                MOV     R3,A
+0061 18                DEC     R0
+0062 E2                MOVX    A,@R0
+0063 FA                MOV     R2,A
+0064 25E0              ADD     A,ACC
+0066 25E0              ADD     A,ACC
+0068 2400        R     ADD     A,#LOW t_in
+006A F8                MOV     R0,A
+006B 120000      E     LCALL   ?C?LLDIPDATA1
+006E EA                MOV     A,R2
+006F C4                SWAP    A
+0070 33                RLC     A
+0071 54E0              ANL     A,#0E0H
+0073 2400        R     ADD     A,#LOW tbuf
+0075 2F                ADD     A,R7
+0076 F8                MOV     R0,A
+0077 EB                MOV     A,R3
+0078 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 138
+0079 7800        R     MOV     R0,#LOW nch
+007B E2                MOVX    A,@R0
+007C 25E0              ADD     A,ACC
+007E 25E0              ADD     A,ACC
+0080 2400        R     ADD     A,#LOW t_in
+0082 F8                MOV     R0,A
+0083 E2                MOVX    A,@R0
+0084 FC                MOV     R4,A
+0085 08                INC     R0
+0086 E2                MOVX    A,@R0
+0087 FD                MOV     R5,A
+0088 08                INC     R0
+0089 E2                MOVX    A,@R0
+008A FE                MOV     R6,A
+008B 08                INC     R0
+008C E2                MOVX    A,@R0
+008D FF                MOV     R7,A
+008E E4                CLR     A
+008F 7B20              MOV     R3,#020H
+0091 FA                MOV     R2,A
+0092 F9                MOV     R1,A
+0093 F8                MOV     R0,A
+0094 D3                SETB    C
+0095 120000      E     LCALL   ?C?ULCMP
+0098 5046              JNC     ?C0028
+                                           ; SOURCE LINE # 139
+009A 803D              SJMP    ?C0084
+009C         ?C0022:
+                                           ; SOURCE LINE # 141
+                                           ; SOURCE LINE # 142
+009C 7800        R     MOV     R0,#LOW dat
+009E E2                MOVX    A,@R0
+009F FB                MOV     R3,A
+00A0 18                DEC     R0
+00A1 E2                MOVX    A,@R0
+00A2 FA                MOV     R2,A
+00A3 25E0              ADD     A,ACC
+00A5 25E0              ADD     A,ACC
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 19  
+
+00A7 2400        R     ADD     A,#LOW t_in
+00A9 F8                MOV     R0,A
+00AA 120000      E     LCALL   ?C?LLDIPDATA1
+00AD EA                MOV     A,R2
+00AE C4                SWAP    A
+00AF 33                RLC     A
+00B0 54E0              ANL     A,#0E0H
+00B2 2400        R     ADD     A,#LOW tbuf
+00B4 2F                ADD     A,R7
+00B5 F8                MOV     R0,A
+00B6 EB                MOV     A,R3
+00B7 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 143
+00B8 7800        R     MOV     R0,#LOW nch
+00BA E2                MOVX    A,@R0
+00BB 25E0              ADD     A,ACC
+00BD 25E0              ADD     A,ACC
+00BF 2400        R     ADD     A,#LOW t_in
+00C1 F8                MOV     R0,A
+00C2 E2                MOVX    A,@R0
+00C3 FC                MOV     R4,A
+00C4 08                INC     R0
+00C5 E2                MOVX    A,@R0
+00C6 FD                MOV     R5,A
+00C7 08                INC     R0
+00C8 E2                MOVX    A,@R0
+00C9 FE                MOV     R6,A
+00CA 08                INC     R0
+00CB E2                MOVX    A,@R0
+00CC FF                MOV     R7,A
+00CD E4                CLR     A
+00CE 7B20              MOV     R3,#020H
+00D0 FA                MOV     R2,A
+00D1 F9                MOV     R1,A
+00D2 F8                MOV     R0,A
+00D3 D3                SETB    C
+00D4 120000      E     LCALL   ?C?ULCMP
+00D7 5007              JNC     ?C0028
+00D9         ?C0084:
+00D9 7800        R     MOV     R0,#LOW nch
+00DB E2                MOVX    A,@R0
+00DC FF                MOV     R7,A
+00DD 120000      R     LCALL   _wait_end_of_send
+                                           ; SOURCE LINE # 144
+                                           ; SOURCE LINE # 145
+00E0         ?C0028:
+00E0 22                RET     
+             ; FUNCTION _put_char (END)
+
+             ; FUNCTION _BeginSend (BEGIN)
+                                           ; SOURCE LINE # 147
+;---- Variable 'nch' assigned to Register 'R3' ----
+0000 AB07              MOV     R3,AR7
+                                           ; SOURCE LINE # 148
+                                           ; SOURCE LINE # 149
+0002 7400        R     MOV     A,#LOW ti_restart
+0004 2B                ADD     A,R3
+0005 F8                MOV     R0,A
+0006 E4                CLR     A
+0007 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 150
+0008 EB                MOV     A,R3
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 20  
+
+0009 25E0              ADD     A,ACC
+000B 25E0              ADD     A,ACC
+000D 2400        R     ADD     A,#LOW t_in
+000F F8                MOV     R0,A
+0010 120000      E     LCALL   ?C?LSTKPDATA
+0013 00                DB      00H
+0014 00                DB      00H
+0015 00                DB      00H
+0016 00                DB      00H
+                                           ; SOURCE LINE # 151
+0017 EB                MOV     A,R3
+0018 25E0              ADD     A,ACC
+001A 25E0              ADD     A,ACC
+001C 2400        R     ADD     A,#LOW t_out
+001E F8                MOV     R0,A
+001F 120000      E     LCALL   ?C?LSTKPDATA
+0022 00                DB      00H
+0023 00                DB      00H
+0024 00                DB      00H
+0025 00                DB      00H
+                                           ; SOURCE LINE # 152
+0026 7400        R     MOV     A,#LOW START_flag
+0028 2B                ADD     A,R3
+0029 F8                MOV     R0,A
+002A E4                CLR     A
+002B F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 153
+002C 7400        R     MOV     A,#LOW STOP_echo_flag
+002E 2B                ADD     A,R3
+002F F8                MOV     R0,A
+0030 E4                CLR     A
+0031 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 154
+0032 7400        R     MOV     A,#LOW STOP_flag
+0034 2B                ADD     A,R3
+0035 F8                MOV     R0,A
+0036 E4                CLR     A
+0037 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 155
+0038 7400        R     MOV     A,#LOW ma_sl_flag
+003A 2B                ADD     A,R3
+003B F8                MOV     R0,A
+003C E2                MOVX    A,@R0
+003D B4011C            CJNE    A,#01H,?C0030
+                                           ; SOURCE LINE # 156
+                                           ; SOURCE LINE # 157
+0040 EB                MOV     A,R3
+0041 25E0              ADD     A,ACC
+0043 25E0              ADD     A,ACC
+0045 2400        R     ADD     A,#LOW t_in
+0047 F8                MOV     R0,A
+0048 120000      E     LCALL   ?C?LLDIPDATA1
+004B EB                MOV     A,R3
+004C C4                SWAP    A
+004D 33                RLC     A
+004E 54E0              ANL     A,#0E0H
+0050 2400        R     ADD     A,#LOW tbuf
+0052 2F                ADD     A,R7
+0053 F8                MOV     R0,A
+0054 74AA              MOV     A,#0AAH
+0056 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 158
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 21  
+
+0057 AF03              MOV     R7,AR3
+0059 120000      R     LCALL   _wait_end_of_send
+                                           ; SOURCE LINE # 159
+                                           ; SOURCE LINE # 160
+005C         ?C0030:
+005C 22                RET     
+             ; FUNCTION _BeginSend (END)
+
+             ; FUNCTION _FinishSend (BEGIN)
+                                           ; SOURCE LINE # 162
+;---- Variable 'nch' assigned to Register 'R3' ----
+0000 AB07              MOV     R3,AR7
+                                           ; SOURCE LINE # 163
+                                           ; SOURCE LINE # 164
+0002 EB                MOV     A,R3
+0003 25E0              ADD     A,ACC
+0005 25E0              ADD     A,ACC
+0007 2400        R     ADD     A,#LOW t_in
+0009 F8                MOV     R0,A
+000A 120000      E     LCALL   ?C?LLDIPDATA1
+000D EB                MOV     A,R3
+000E C4                SWAP    A
+000F 33                RLC     A
+0010 54E0              ANL     A,#0E0H
+0012 2400        R     ADD     A,#LOW tbuf
+0014 2F                ADD     A,R7
+0015 F8                MOV     R0,A
+0016 74AB              MOV     A,#0ABH
+0018 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 165
+0019 AF03              MOV     R7,AR3
+001B 120000      R     LCALL   _wait_end_of_send
+                                           ; SOURCE LINE # 166
+001E 7400        R     MOV     A,#LOW ma_sl_flag
+0020 2B                ADD     A,R3
+0021 F8                MOV     R0,A
+0022 E2                MOVX    A,@R0
+0023 6401              XRL     A,#01H
+0025 7032              JNZ     ?C0032
+0027 7400        R     MOV     A,#LOW echo_flag
+0029 2B                ADD     A,R3
+002A F8                MOV     R0,A
+002B E2                MOVX    A,@R0
+002C 702B              JNZ     ?C0032
+                                           ; SOURCE LINE # 167
+                                           ; SOURCE LINE # 169
+002E EB                MOV     A,R3
+002F 25E0              ADD     A,ACC
+0031 25E0              ADD     A,ACC
+0033 2400        R     ADD     A,#LOW r_in
+0035 F8                MOV     R0,A
+0036 120000      E     LCALL   ?C?LSTKPDATA
+0039 00                DB      00H
+003A 00                DB      00H
+003B 00                DB      00H
+003C 00                DB      00H
+                                           ; SOURCE LINE # 170
+003D EB                MOV     A,R3
+003E 25E0              ADD     A,ACC
+0040 25E0              ADD     A,ACC
+0042 2400        R     ADD     A,#LOW r_out
+0044 F8                MOV     R0,A
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 22  
+
+0045 120000      E     LCALL   ?C?LSTKPDATA
+0048 00                DB      00H
+0049 00                DB      00H
+004A 00                DB      00H
+004B 00                DB      00H
+                                           ; SOURCE LINE # 171
+004C 7400        R     MOV     A,#LOW START_flag
+004E 2B                ADD     A,R3
+004F F8                MOV     R0,A
+0050 7401              MOV     A,#01H
+0052 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 172
+0053 7400        R     MOV     A,#LOW STOP_flag
+0055 2B                ADD     A,R3
+0056 F8                MOV     R0,A
+0057 E4                CLR     A
+0058 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 174
+                                           ; SOURCE LINE # 175
+0059         ?C0032:
+0059 22                RET     
+             ; FUNCTION _FinishSend (END)
+
+             ; FUNCTION _get_t_in (BEGIN)
+                                           ; SOURCE LINE # 177
+;---- Variable 'nch' assigned to Register 'R7' ----
+                                           ; SOURCE LINE # 178
+                                           ; SOURCE LINE # 179
+0000 EF                MOV     A,R7
+0001 25E0              ADD     A,ACC
+0003 25E0              ADD     A,ACC
+0005 2400        R     ADD     A,#LOW t_in
+0007 F8                MOV     R0,A
+0008 08                INC     R0
+0009 08                INC     R0
+000A 08                INC     R0
+000B E2                MOVX    A,@R0
+000C FF                MOV     R7,A
+                                           ; SOURCE LINE # 180
+000D         ?C0033:
+000D 22                RET     
+             ; FUNCTION _get_t_in (END)
+
+             ; FUNCTION _volkovsend (BEGIN)
+                                           ; SOURCE LINE # 182
+0000 7800        R     MOV     R0,#LOW nch
+0002 EF                MOV     A,R7
+0003 F2                MOVX    @R0,A
+0004 08                INC     R0
+0005 EB                MOV     A,R3
+0006 F2                MOVX    @R0,A
+0007 08                INC     R0
+0008 EA                MOV     A,R2
+0009 F2                MOVX    @R0,A
+000A 08                INC     R0
+000B E9                MOV     A,R1
+000C F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 183
+                                           ; SOURCE LINE # 187
+000D 7800        R     MOV     R0,#LOW nch
+000F E2                MOVX    A,@R0
+0010 2400        R     ADD     A,#LOW volkov_flag
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 23  
+
+0012 F8                MOV     R0,A
+0013 E2                MOVX    A,@R0
+0014 706E              JNZ     ?C0034
+                                           ; SOURCE LINE # 188
+                                           ; SOURCE LINE # 189
+0016 7800        R     MOV     R0,#LOW i
+0018 120000      E     LCALL   ?C?LSTKPDATA
+001B 00                DB      00H
+001C 00                DB      00H
+001D 00                DB      00H
+001E 00                DB      00H
+001F         ?C0035:
+001F 7800        R     MOV     R0,#LOW cursize
+0021 E2                MOVX    A,@R0
+0022 FC                MOV     R4,A
+0023 08                INC     R0
+0024 E2                MOVX    A,@R0
+0025 FD                MOV     R5,A
+0026 08                INC     R0
+0027 E2                MOVX    A,@R0
+0028 FE                MOV     R6,A
+0029 08                INC     R0
+002A E2                MOVX    A,@R0
+002B FF                MOV     R7,A
+002C 7800        R     MOV     R0,#LOW i
+002E E2                MOVX    A,@R0
+002F FB                MOV     R3,A
+0030 08                INC     R0
+0031 E2                MOVX    A,@R0
+0032 F9                MOV     R1,A
+0033 08                INC     R0
+0034 E2                MOVX    A,@R0
+0035 FA                MOV     R2,A
+0036 08                INC     R0
+0037 E2                MOVX    A,@R0
+0038 CB                XCH     A,R3
+0039 F8                MOV     R0,A
+003A C3                CLR     C
+003B 120000      E     LCALL   ?C?ULCMP
+003E 4003              JC      $ + 5H
+0040 020000      R     LJMP    ?C0049
+                                           ; SOURCE LINE # 190
+                                           ; SOURCE LINE # 191
+0043 7800        R     MOV     R0,#LOW i
+0045 08                INC     R0
+0046 08                INC     R0
+0047 E2                MOVX    A,@R0
+0048 FE                MOV     R6,A
+0049 08                INC     R0
+004A E2                MOVX    A,@R0
+004B FF                MOV     R7,A
+004C 7800        R     MOV     R0,#LOW curbuf
+004E E2                MOVX    A,@R0
+004F FB                MOV     R3,A
+0050 08                INC     R0
+0051 E2                MOVX    A,@R0
+0052 FA                MOV     R2,A
+0053 08                INC     R0
+0054 E2                MOVX    A,@R0
+0055 F9                MOV     R1,A
+0056 8F82              MOV     DPL,R7
+0058 8E83              MOV     DPH,R6
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 24  
+
+005A 120000      E     LCALL   ?C?CLDOPTR
+005D FD                MOV     R5,A
+005E 7800        R     MOV     R0,#LOW nch
+0060 E2                MOVX    A,@R0
+0061 FF                MOV     R7,A
+0062 120000      R     LCALL   _com_putchar
+                                           ; SOURCE LINE # 192
+0065 7800        R     MOV     R0,#LOW i
+0067 E2                MOVX    A,@R0
+0068 FC                MOV     R4,A
+0069 08                INC     R0
+006A E2                MOVX    A,@R0
+006B FD                MOV     R5,A
+006C 08                INC     R0
+006D E2                MOVX    A,@R0
+006E FE                MOV     R6,A
+006F 08                INC     R0
+0070 E2                MOVX    A,@R0
+0071 2401              ADD     A,#01H
+0073 FF                MOV     R7,A
+0074 E4                CLR     A
+0075 3E                ADDC    A,R6
+0076 FE                MOV     R6,A
+0077 E4                CLR     A
+0078 3D                ADDC    A,R5
+0079 FD                MOV     R5,A
+007A E4                CLR     A
+007B 3C                ADDC    A,R4
+007C FC                MOV     R4,A
+007D 7800        R     MOV     R0,#LOW i
+007F 120000      E     LCALL   ?C?LSTPDATA
+0082 809B              SJMP    ?C0035
+                                           ; SOURCE LINE # 193
+0084         ?C0034:
+                                           ; SOURCE LINE # 195
+                                           ; SOURCE LINE # 197
+0084 7800        R     MOV     R0,#LOW nch
+0086 E2                MOVX    A,@R0
+0087 FF                MOV     R7,A
+0088 120000      R     LCALL   _BeginSend
+                                           ; SOURCE LINE # 198
+008B 7800        R     MOV     R0,#LOW nch
+008D E2                MOVX    A,@R0
+008E FF                MOV     R7,A
+008F 2400        R     ADD     A,#LOW AddressPLC
+0091 F8                MOV     R0,A
+0092 E2                MOVX    A,@R0
+0093 FE                MOV     R6,A
+0094 7800        R     MOV     R0,#LOW chksum
+0096 F2                MOVX    @R0,A
+0097 FD                MOV     R5,A
+                                           ; SOURCE LINE # 199
+0098 120000      R     LCALL   _put_char
+                                           ; SOURCE LINE # 200
+009B 7800        R     MOV     R0,#LOW i
+009D 120000      E     LCALL   ?C?LSTKPDATA
+00A0 00                DB      00H
+00A1 00                DB      00H
+00A2 00                DB      00H
+00A3 00                DB      00H
+00A4         ?C0039:
+00A4 7800        R     MOV     R0,#LOW cursize
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 25  
+
+00A6 E2                MOVX    A,@R0
+00A7 FC                MOV     R4,A
+00A8 08                INC     R0
+00A9 E2                MOVX    A,@R0
+00AA FD                MOV     R5,A
+00AB 08                INC     R0
+00AC E2                MOVX    A,@R0
+00AD FE                MOV     R6,A
+00AE 08                INC     R0
+00AF E2                MOVX    A,@R0
+00B0 FF                MOV     R7,A
+00B1 7800        R     MOV     R0,#LOW i
+00B3 E2                MOVX    A,@R0
+00B4 FB                MOV     R3,A
+00B5 08                INC     R0
+00B6 E2                MOVX    A,@R0
+00B7 F9                MOV     R1,A
+00B8 08                INC     R0
+00B9 E2                MOVX    A,@R0
+00BA FA                MOV     R2,A
+00BB 08                INC     R0
+00BC E2                MOVX    A,@R0
+00BD CB                XCH     A,R3
+00BE F8                MOV     R0,A
+00BF C3                CLR     C
+00C0 120000      E     LCALL   ?C?ULCMP
+00C3 504C              JNC     ?C0040
+                                           ; SOURCE LINE # 201
+                                           ; SOURCE LINE # 202
+00C5 7800        R     MOV     R0,#LOW chksum
+00C7 E2                MOVX    A,@R0
+00C8 FF                MOV     R7,A
+00C9 C007              PUSH    AR7
+00CB 08                INC     R0
+00CC 08                INC     R0
+00CD 08                INC     R0
+00CE E2                MOVX    A,@R0
+00CF FE                MOV     R6,A
+00D0 08                INC     R0
+00D1 E2                MOVX    A,@R0
+00D2 FF                MOV     R7,A
+00D3 7800        R     MOV     R0,#LOW curbuf
+00D5 E2                MOVX    A,@R0
+00D6 FB                MOV     R3,A
+00D7 08                INC     R0
+00D8 E2                MOVX    A,@R0
+00D9 FA                MOV     R2,A
+00DA 08                INC     R0
+00DB E2                MOVX    A,@R0
+00DC F9                MOV     R1,A
+00DD 8F82              MOV     DPL,R7
+00DF 8E83              MOV     DPH,R6
+00E1 120000      E     LCALL   ?C?CLDOPTR
+00E4 FD                MOV     R5,A
+00E5 D0E0              POP     ACC
+00E7 6D                XRL     A,R5
+00E8 7800        R     MOV     R0,#LOW chksum
+00EA F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 203
+00EB 7800        R     MOV     R0,#LOW nch
+00ED E2                MOVX    A,@R0
+00EE FF                MOV     R7,A
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 26  
+
+00EF 120000      R     LCALL   _put_char
+                                           ; SOURCE LINE # 204
+00F2 7800        R     MOV     R0,#LOW i
+00F4 E2                MOVX    A,@R0
+00F5 FC                MOV     R4,A
+00F6 08                INC     R0
+00F7 E2                MOVX    A,@R0
+00F8 FD                MOV     R5,A
+00F9 08                INC     R0
+00FA E2                MOVX    A,@R0
+00FB FE                MOV     R6,A
+00FC 08                INC     R0
+00FD E2                MOVX    A,@R0
+00FE 2401              ADD     A,#01H
+0100 FF                MOV     R7,A
+0101 E4                CLR     A
+0102 3E                ADDC    A,R6
+0103 FE                MOV     R6,A
+0104 E4                CLR     A
+0105 3D                ADDC    A,R5
+0106 FD                MOV     R5,A
+0107 E4                CLR     A
+0108 3C                ADDC    A,R4
+0109 FC                MOV     R4,A
+010A 7800        R     MOV     R0,#LOW i
+010C 120000      E     LCALL   ?C?LSTPDATA
+010F 8093              SJMP    ?C0039
+0111         ?C0040:
+                                           ; SOURCE LINE # 205
+0111 7800        R     MOV     R0,#LOW nch
+0113 E2                MOVX    A,@R0
+0114 FF                MOV     R7,A
+0115 2400        R     ADD     A,#LOW flag32
+0117 F8                MOV     R0,A
+0118 E2                MOVX    A,@R0
+0119 6401              XRL     A,#01H
+011B 6003              JZ      $ + 5H
+011D 020000      R     LJMP    ?C0042
+                                           ; SOURCE LINE # 206
+                                           ; SOURCE LINE # 207
+0120 7800        R     MOV     R0,#LOW chksum
+0122 E2                MOVX    A,@R0
+0123 FE                MOV     R6,A
+0124 64AA              XRL     A,#0AAH
+0126 6009              JZ      ?C0044
+0128 EE                MOV     A,R6
+0129 64AB              XRL     A,#0ABH
+012B 6004              JZ      ?C0044
+012D EE                MOV     A,R6
+012E B4AC08            CJNE    A,#0ACH,?C0043
+0131         ?C0044:
+0131 120000      R     LCALL   _get_t_in
+0134 C3                CLR     C
+0135 741C              MOV     A,#01CH
+0137 800A              SJMP    ?C0085
+0139         ?C0043:
+0139 7800        R     MOV     R0,#LOW nch
+013B E2                MOVX    A,@R0
+013C FF                MOV     R7,A
+013D 120000      R     LCALL   _get_t_in
+0140 C3                CLR     C
+0141 741D              MOV     A,#01DH
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 27  
+
+0143         ?C0085:
+0143 9F                SUBB    A,R7
+0144 FF                MOV     R7,A
+0145 E4                CLR     A
+0146 9400              SUBB    A,#00H
+0148 FE                MOV     R6,A
+0149 E4                CLR     A
+014A FC                MOV     R4,A
+014B FD                MOV     R5,A
+014C 7800        R     MOV     R0,#LOW tmp
+014E 120000      E     LCALL   ?C?LSTPDATA
+0151         ?C0045:
+                                           ; SOURCE LINE # 208
+0151 7800        R     MOV     R0,#LOW j
+0153 120000      E     LCALL   ?C?LSTKPDATA
+0156 00                DB      00H
+0157 00                DB      00H
+0158 00                DB      00H
+0159 00                DB      00H
+015A         ?C0046:
+015A 7800        R     MOV     R0,#LOW tmp
+015C E2                MOVX    A,@R0
+015D FC                MOV     R4,A
+015E 08                INC     R0
+015F E2                MOVX    A,@R0
+0160 FD                MOV     R5,A
+0161 08                INC     R0
+0162 E2                MOVX    A,@R0
+0163 FE                MOV     R6,A
+0164 08                INC     R0
+0165 E2                MOVX    A,@R0
+0166 FF                MOV     R7,A
+0167 7800        R     MOV     R0,#LOW j
+0169 E2                MOVX    A,@R0
+016A FB                MOV     R3,A
+016B 08                INC     R0
+016C E2                MOVX    A,@R0
+016D F9                MOV     R1,A
+016E 08                INC     R0
+016F E2                MOVX    A,@R0
+0170 FA                MOV     R2,A
+0171 08                INC     R0
+0172 E2                MOVX    A,@R0
+0173 CB                XCH     A,R3
+0174 F8                MOV     R0,A
+0175 C3                CLR     C
+0176 120000      E     LCALL   ?C?ULCMP
+0179 5028              JNC     ?C0042
+017B 7800        R     MOV     R0,#LOW nch
+017D E2                MOVX    A,@R0
+017E FF                MOV     R7,A
+017F E4                CLR     A
+0180 FD                MOV     R5,A
+0181 120000      R     LCALL   _put_char
+0184 7800        R     MOV     R0,#LOW j
+0186 E2                MOVX    A,@R0
+0187 FC                MOV     R4,A
+0188 08                INC     R0
+0189 E2                MOVX    A,@R0
+018A FD                MOV     R5,A
+018B 08                INC     R0
+018C E2                MOVX    A,@R0
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 28  
+
+018D FE                MOV     R6,A
+018E 08                INC     R0
+018F E2                MOVX    A,@R0
+0190 2401              ADD     A,#01H
+0192 FF                MOV     R7,A
+0193 E4                CLR     A
+0194 3E                ADDC    A,R6
+0195 FE                MOV     R6,A
+0196 E4                CLR     A
+0197 3D                ADDC    A,R5
+0198 FD                MOV     R5,A
+0199 E4                CLR     A
+019A 3C                ADDC    A,R4
+019B FC                MOV     R4,A
+019C 7800        R     MOV     R0,#LOW j
+019E 120000      E     LCALL   ?C?LSTPDATA
+01A1 80B7              SJMP    ?C0046
+                                           ; SOURCE LINE # 209
+01A3         ?C0042:
+                                           ; SOURCE LINE # 210
+01A3 7800        R     MOV     R0,#LOW nch
+01A5 E2                MOVX    A,@R0
+01A6 FF                MOV     R7,A
+01A7 7800        R     MOV     R0,#LOW chksum
+01A9 E2                MOVX    A,@R0
+01AA FD                MOV     R5,A
+01AB 120000      R     LCALL   _put_char
+                                           ; SOURCE LINE # 211
+01AE 7800        R     MOV     R0,#LOW nch
+01B0 E2                MOVX    A,@R0
+01B1 FF                MOV     R7,A
+01B2 120000      R     LCALL   _FinishSend
+                                           ; SOURCE LINE # 212
+                                           ; SOURCE LINE # 213
+01B5         ?C0049:
+01B5 22                RET     
+             ; FUNCTION _volkovsend (END)
+
+             ; FUNCTION _volkovread (BEGIN)
+                                           ; SOURCE LINE # 215
+0000 7800        R     MOV     R0,#LOW nch
+0002 EF                MOV     A,R7
+0003 F2                MOVX    @R0,A
+0004 08                INC     R0
+0005 EB                MOV     A,R3
+0006 F2                MOVX    @R0,A
+0007 08                INC     R0
+0008 EA                MOV     A,R2
+0009 F2                MOVX    @R0,A
+000A 08                INC     R0
+000B E9                MOV     A,R1
+000C F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 216
+                                           ; SOURCE LINE # 217
+000D E4                CLR     A
+000E 7800        R     MOV     R0,#LOW chksum
+0010 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 219
+0011 7800        R     MOV     R0,#LOW nch
+0013 E2                MOVX    A,@R0
+0014 FB                MOV     R3,A
+0015 2400        R     ADD     A,#LOW volkov_flag
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 29  
+
+0017 F8                MOV     R0,A
+0018 E2                MOVX    A,@R0
+0019 6003              JZ      $ + 5H
+001B 020000      R     LJMP    ?C0050
+                                           ; SOURCE LINE # 220
+                                           ; SOURCE LINE # 221
+001E 7800        R     MOV     R0,#LOW k
+0020 120000      E     LCALL   ?C?LSTKPDATA
+0023 00                DB      00H
+0024 00                DB      00H
+0025 00                DB      00H
+0026 00                DB      00H
+                                           ; SOURCE LINE # 222
+0027 EB                MOV     A,R3
+0028 25E0              ADD     A,ACC
+002A 25E0              ADD     A,ACC
+002C 2400        R     ADD     A,#LOW r_in
+002E F8                MOV     R0,A
+002F E2                MOVX    A,@R0
+0030 FC                MOV     R4,A
+0031 08                INC     R0
+0032 E2                MOVX    A,@R0
+0033 FD                MOV     R5,A
+0034 08                INC     R0
+0035 E2                MOVX    A,@R0
+0036 FE                MOV     R6,A
+0037 08                INC     R0
+0038 E2                MOVX    A,@R0
+0039 FF                MOV     R7,A
+003A 7800        R     MOV     R0,#LOW j
+003C 120000      E     LCALL   ?C?LSTPDATA
+                                           ; SOURCE LINE # 223
+003F EB                MOV     A,R3
+0040 25E0              ADD     A,ACC
+0042 25E0              ADD     A,ACC
+0044 2400        R     ADD     A,#LOW r_in
+0046 F8                MOV     R0,A
+0047 120000      E     LCALL   ?C?LSTKPDATA
+004A 00                DB      00H
+004B 00                DB      00H
+004C 00                DB      00H
+004D 00                DB      00H
+                                           ; SOURCE LINE # 224
+004E 7800        R     MOV     R0,#LOW i
+0050 120000      E     LCALL   ?C?LSTKPDATA
+0053 00                DB      00H
+0054 00                DB      00H
+0055 00                DB      00H
+0056 00                DB      00H
+0057         ?C0051:
+0057 7800        R     MOV     R0,#LOW j
+0059 E2                MOVX    A,@R0
+005A FC                MOV     R4,A
+005B 08                INC     R0
+005C E2                MOVX    A,@R0
+005D FD                MOV     R5,A
+005E 08                INC     R0
+005F E2                MOVX    A,@R0
+0060 FE                MOV     R6,A
+0061 08                INC     R0
+0062 E2                MOVX    A,@R0
+0063 FF                MOV     R7,A
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 30  
+
+0064 7800        R     MOV     R0,#LOW i
+0066 E2                MOVX    A,@R0
+0067 FB                MOV     R3,A
+0068 08                INC     R0
+0069 E2                MOVX    A,@R0
+006A F9                MOV     R1,A
+006B 08                INC     R0
+006C E2                MOVX    A,@R0
+006D FA                MOV     R2,A
+006E 08                INC     R0
+006F E2                MOVX    A,@R0
+0070 CB                XCH     A,R3
+0071 F8                MOV     R0,A
+0072 C3                CLR     C
+0073 120000      E     LCALL   ?C?ULCMP
+0076 4003              JC      $ + 5H
+0078 020000      R     LJMP    ?C0056
+                                           ; SOURCE LINE # 225
+                                           ; SOURCE LINE # 226
+007B 7800        R     MOV     R0,#LOW i
+007D 08                INC     R0
+007E 08                INC     R0
+007F 08                INC     R0
+0080 E2                MOVX    A,@R0
+0081 FF                MOV     R7,A
+0082 7800        R     MOV     R0,#LOW nch
+0084 E2                MOVX    A,@R0
+0085 C4                SWAP    A
+0086 33                RLC     A
+0087 54E0              ANL     A,#0E0H
+0089 2400        R     ADD     A,#LOW rbuf
+008B 2F                ADD     A,R7
+008C F8                MOV     R0,A
+008D E2                MOVX    A,@R0
+008E FF                MOV     R7,A
+008F C007              PUSH    AR7
+0091 7800        R     MOV     R0,#LOW k
+0093 08                INC     R0
+0094 08                INC     R0
+0095 E2                MOVX    A,@R0
+0096 FE                MOV     R6,A
+0097 08                INC     R0
+0098 E2                MOVX    A,@R0
+0099 FF                MOV     R7,A
+009A 7800        R     MOV     R0,#LOW curbuf
+009C E2                MOVX    A,@R0
+009D FB                MOV     R3,A
+009E 08                INC     R0
+009F E2                MOVX    A,@R0
+00A0 FA                MOV     R2,A
+00A1 08                INC     R0
+00A2 E2                MOVX    A,@R0
+00A3 F9                MOV     R1,A
+00A4 8F82              MOV     DPL,R7
+00A6 8E83              MOV     DPH,R6
+00A8 D0E0              POP     ACC
+00AA 120000      E     LCALL   ?C?CSTOPTR
+                                           ; SOURCE LINE # 227
+00AD 7800        R     MOV     R0,#LOW k
+00AF E2                MOVX    A,@R0
+00B0 FC                MOV     R4,A
+00B1 08                INC     R0
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 31  
+
+00B2 E2                MOVX    A,@R0
+00B3 FD                MOV     R5,A
+00B4 08                INC     R0
+00B5 E2                MOVX    A,@R0
+00B6 FE                MOV     R6,A
+00B7 08                INC     R0
+00B8 E2                MOVX    A,@R0
+00B9 2401              ADD     A,#01H
+00BB FF                MOV     R7,A
+00BC E4                CLR     A
+00BD 3E                ADDC    A,R6
+00BE FE                MOV     R6,A
+00BF E4                CLR     A
+00C0 3D                ADDC    A,R5
+00C1 FD                MOV     R5,A
+00C2 E4                CLR     A
+00C3 3C                ADDC    A,R4
+00C4 FC                MOV     R4,A
+00C5 7800        R     MOV     R0,#LOW k
+00C7 120000      E     LCALL   ?C?LSTPDATA
+                                           ; SOURCE LINE # 228
+00CA 7800        R     MOV     R0,#LOW cursize
+00CC E2                MOVX    A,@R0
+00CD FC                MOV     R4,A
+00CE 08                INC     R0
+00CF E2                MOVX    A,@R0
+00D0 FD                MOV     R5,A
+00D1 08                INC     R0
+00D2 E2                MOVX    A,@R0
+00D3 FE                MOV     R6,A
+00D4 08                INC     R0
+00D5 E2                MOVX    A,@R0
+00D6 FF                MOV     R7,A
+00D7 7800        R     MOV     R0,#LOW k
+00D9 E2                MOVX    A,@R0
+00DA FB                MOV     R3,A
+00DB 08                INC     R0
+00DC E2                MOVX    A,@R0
+00DD F9                MOV     R1,A
+00DE 08                INC     R0
+00DF E2                MOVX    A,@R0
+00E0 FA                MOV     R2,A
+00E1 08                INC     R0
+00E2 E2                MOVX    A,@R0
+00E3 CB                XCH     A,R3
+00E4 F8                MOV     R0,A
+00E5 C3                CLR     C
+00E6 120000      E     LCALL   ?C?ULCMP
+00E9 4003              JC      ?C0053
+00EB 020000      R     LJMP    ?C0086
+                                           ; SOURCE LINE # 229
+00EE         ?C0053:
+00EE 7800        R     MOV     R0,#LOW i
+00F0 E2                MOVX    A,@R0
+00F1 FC                MOV     R4,A
+00F2 08                INC     R0
+00F3 E2                MOVX    A,@R0
+00F4 FD                MOV     R5,A
+00F5 08                INC     R0
+00F6 E2                MOVX    A,@R0
+00F7 FE                MOV     R6,A
+00F8 08                INC     R0
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 32  
+
+00F9 E2                MOVX    A,@R0
+00FA 2401              ADD     A,#01H
+00FC FF                MOV     R7,A
+00FD E4                CLR     A
+00FE 3E                ADDC    A,R6
+00FF FE                MOV     R6,A
+0100 E4                CLR     A
+0101 3D                ADDC    A,R5
+0102 FD                MOV     R5,A
+0103 E4                CLR     A
+0104 3C                ADDC    A,R4
+0105 FC                MOV     R4,A
+0106 7800        R     MOV     R0,#LOW i
+0108 120000      E     LCALL   ?C?LSTPDATA
+010B 020000      R     LJMP    ?C0051
+                                           ; SOURCE LINE # 230
+010E         ?C0050:
+                                           ; SOURCE LINE # 232
+                                           ; SOURCE LINE # 233
+010E 7800        R     MOV     R0,#LOW nch
+0110 E2                MOVX    A,@R0
+0111 FB                MOV     R3,A
+0112 2400        R     ADD     A,#LOW STOP_flag
+0114 F8                MOV     R0,A
+0115 E2                MOVX    A,@R0
+0116 7006              JNZ     ?C0057
+0118 74FF              MOV     A,#0FFH
+011A FF                MOV     R7,A
+011B 020000      R     LJMP    ?C0090
+011E         ?C0057:
+                                           ; SOURCE LINE # 234
+011E 7800        R     MOV     R0,#LOW nch
+0120 E2                MOVX    A,@R0
+0121 FF                MOV     R7,A
+0122 2400        R     ADD     A,#LOW STOP_flag
+0124 F8                MOV     R0,A
+0125 E4                CLR     A
+0126 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 235
+0127 EF                MOV     A,R7
+0128 25E0              ADD     A,ACC
+012A 25E0              ADD     A,ACC
+012C 2400        R     ADD     A,#LOW r_in
+012E F8                MOV     R0,A
+012F E2                MOVX    A,@R0
+0130 FC                MOV     R4,A
+0131 08                INC     R0
+0132 E2                MOVX    A,@R0
+0133 FD                MOV     R5,A
+0134 08                INC     R0
+0135 E2                MOVX    A,@R0
+0136 FE                MOV     R6,A
+0137 08                INC     R0
+0138 E2                MOVX    A,@R0
+0139 FF                MOV     R7,A
+013A 7800        R     MOV     R0,#LOW j
+013C 120000      E     LCALL   ?C?LSTPDATA
+                                           ; SOURCE LINE # 236
+013F EB                MOV     A,R3
+0140 25E0              ADD     A,ACC
+0142 25E0              ADD     A,ACC
+0144 2400        R     ADD     A,#LOW r_in
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 33  
+
+0146 F8                MOV     R0,A
+0147 120000      E     LCALL   ?C?LSTKPDATA
+014A 00                DB      00H
+014B 00                DB      00H
+014C 00                DB      00H
+014D 00                DB      00H
+                                           ; SOURCE LINE # 237
+014E 7800        R     MOV     R0,#LOW i
+0150 120000      E     LCALL   ?C?LSTKPDATA
+0153 00                DB      00H
+0154 00                DB      00H
+0155 00                DB      00H
+0156 00                DB      00H
+                                           ; SOURCE LINE # 238
+0157 7400        R     MOV     A,#LOW ma_sl_flag
+0159 2B                ADD     A,R3
+015A F8                MOV     R0,A
+015B E2                MOVX    A,@R0
+015C 701C              JNZ     ?C0058
+015E 7800        R     MOV     R0,#LOW i
+0160 120000      E     LCALL   ?C?LLDIPDATA1
+0163 7800        R     MOV     R0,#LOW nch
+0165 E2                MOVX    A,@R0
+0166 C4                SWAP    A
+0167 33                RLC     A
+0168 54E0              ANL     A,#0E0H
+016A 2400        R     ADD     A,#LOW rbuf
+016C 2F                ADD     A,R7
+016D F8                MOV     R0,A
+016E E2                MOVX    A,@R0
+016F 64AA              XRL     A,#0AAH
+0171 6007              JZ      ?C0058
+0173 74FF              MOV     A,#0FFH
+0175 7FFD              MOV     R7,#0FDH
+0177         ?C0087:
+0177 020000      R     LJMP    ?C0090
+017A         ?C0058:
+                                           ; SOURCE LINE # 239
+017A 7800        R     MOV     R0,#LOW i
+017C 08                INC     R0
+017D 08                INC     R0
+017E 08                INC     R0
+017F E2                MOVX    A,@R0
+0180 FF                MOV     R7,A
+0181 7800        R     MOV     R0,#LOW nch
+0183 E2                MOVX    A,@R0
+0184 C4                SWAP    A
+0185 33                RLC     A
+0186 54E0              ANL     A,#0E0H
+0188 2400        R     ADD     A,#LOW rbuf
+018A 2F                ADD     A,R7
+018B F8                MOV     R0,A
+018C E2                MOVX    A,@R0
+018D FF                MOV     R7,A
+018E 64AC              XRL     A,#0ACH
+0190 6006              JZ      ?C0060
+0192 7800        R     MOV     R0,#LOW m
+0194 EF                MOV     A,R7
+0195 F2                MOVX    @R0,A
+0196 8016              SJMP    ?C0061
+0198         ?C0060:
+0198 7800        R     MOV     R0,#LOW i
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 34  
+
+019A 120000      E     LCALL   ?C?LILDPDATA1
+019D 7800        R     MOV     R0,#LOW nch
+019F E2                MOVX    A,@R0
+01A0 C4                SWAP    A
+01A1 33                RLC     A
+01A2 54E0              ANL     A,#0E0H
+01A4 2400        R     ADD     A,#LOW rbuf
+01A6 2F                ADD     A,R7
+01A7 F8                MOV     R0,A
+01A8 E2                MOVX    A,@R0
+01A9 24AA              ADD     A,#0AAH
+01AB 7800        R     MOV     R0,#LOW m
+01AD F2                MOVX    @R0,A
+01AE         ?C0061:
+                                           ; SOURCE LINE # 240
+01AE 7800        R     MOV     R0,#LOW i
+01B0 E2                MOVX    A,@R0
+01B1 FC                MOV     R4,A
+01B2 08                INC     R0
+01B3 E2                MOVX    A,@R0
+01B4 FD                MOV     R5,A
+01B5 08                INC     R0
+01B6 E2                MOVX    A,@R0
+01B7 FE                MOV     R6,A
+01B8 08                INC     R0
+01B9 E2                MOVX    A,@R0
+01BA 2401              ADD     A,#01H
+01BC FF                MOV     R7,A
+01BD E4                CLR     A
+01BE 3E                ADDC    A,R6
+01BF FE                MOV     R6,A
+01C0 E4                CLR     A
+01C1 3D                ADDC    A,R5
+01C2 FD                MOV     R5,A
+01C3 E4                CLR     A
+01C4 3C                ADDC    A,R4
+01C5 FC                MOV     R4,A
+01C6 7800        R     MOV     R0,#LOW i
+01C8 120000      E     LCALL   ?C?LSTPDATA
+                                           ; SOURCE LINE # 241
+01CB 7800        R     MOV     R0,#LOW nch
+01CD E2                MOVX    A,@R0
+01CE 2400        R     ADD     A,#LOW AddressPLC
+01D0 F8                MOV     R0,A
+01D1 E2                MOVX    A,@R0
+01D2 FF                MOV     R7,A
+01D3 7800        R     MOV     R0,#LOW m
+01D5 E2                MOVX    A,@R0
+01D6 FB                MOV     R3,A
+01D7 6F                XRL     A,R7
+01D8 6007              JZ      ?C0062
+01DA 74FF              MOV     A,#0FFH
+01DC 7FFC              MOV     R7,#0FCH
+01DE         ?C0088:
+01DE 020000      R     LJMP    ?C0090
+01E1         ?C0062:
+                                           ; SOURCE LINE # 242
+01E1 7800        R     MOV     R0,#LOW chksum
+01E3 EB                MOV     A,R3
+01E4 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 243
+01E5 7800        R     MOV     R0,#LOW k
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 35  
+
+01E7 120000      E     LCALL   ?C?LSTKPDATA
+01EA 00                DB      00H
+01EB 00                DB      00H
+01EC 00                DB      00H
+01ED 00                DB      00H
+01EE         ?C0065:
+                                           ; SOURCE LINE # 245
+                                           ; SOURCE LINE # 246
+01EE 7800        R     MOV     R0,#LOW i
+01F0 08                INC     R0
+01F1 08                INC     R0
+01F2 08                INC     R0
+01F3 E2                MOVX    A,@R0
+01F4 FF                MOV     R7,A
+01F5 7800        R     MOV     R0,#LOW nch
+01F7 E2                MOVX    A,@R0
+01F8 C4                SWAP    A
+01F9 33                RLC     A
+01FA 54E0              ANL     A,#0E0H
+01FC 2400        R     ADD     A,#LOW rbuf
+01FE 2F                ADD     A,R7
+01FF F8                MOV     R0,A
+0200 E2                MOVX    A,@R0
+0201 FF                MOV     R7,A
+0202 64AC              XRL     A,#0ACH
+0204 6006              JZ      ?C0066
+0206 7800        R     MOV     R0,#LOW m
+0208 EF                MOV     A,R7
+0209 F2                MOVX    @R0,A
+020A 8016              SJMP    ?C0067
+020C         ?C0066:
+020C 7800        R     MOV     R0,#LOW i
+020E 120000      E     LCALL   ?C?LILDPDATA1
+0211 7800        R     MOV     R0,#LOW nch
+0213 E2                MOVX    A,@R0
+0214 C4                SWAP    A
+0215 33                RLC     A
+0216 54E0              ANL     A,#0E0H
+0218 2400        R     ADD     A,#LOW rbuf
+021A 2F                ADD     A,R7
+021B F8                MOV     R0,A
+021C E2                MOVX    A,@R0
+021D 24AA              ADD     A,#0AAH
+021F 7800        R     MOV     R0,#LOW m
+0221 F2                MOVX    @R0,A
+0222         ?C0067:
+                                           ; SOURCE LINE # 247
+0222 7800        R     MOV     R0,#LOW i
+0224 E2                MOVX    A,@R0
+0225 FC                MOV     R4,A
+0226 08                INC     R0
+0227 E2                MOVX    A,@R0
+0228 FD                MOV     R5,A
+0229 08                INC     R0
+022A E2                MOVX    A,@R0
+022B FE                MOV     R6,A
+022C 08                INC     R0
+022D E2                MOVX    A,@R0
+022E 2401              ADD     A,#01H
+0230 FF                MOV     R7,A
+0231 E4                CLR     A
+0232 3E                ADDC    A,R6
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 36  
+
+0233 FE                MOV     R6,A
+0234 E4                CLR     A
+0235 3D                ADDC    A,R5
+0236 FD                MOV     R5,A
+0237 E4                CLR     A
+0238 3C                ADDC    A,R4
+0239 FC                MOV     R4,A
+023A 7800        R     MOV     R0,#LOW i
+023C 120000      E     LCALL   ?C?LSTPDATA
+                                           ; SOURCE LINE # 248
+023F 7800        R     MOV     R0,#LOW chksum
+0241 E2                MOVX    A,@R0
+0242 FF                MOV     R7,A
+0243 08                INC     R0
+0244 E2                MOVX    A,@R0
+0245 FE                MOV     R6,A
+0246 EF                MOV     A,R7
+0247 6E                XRL     A,R6
+0248 18                DEC     R0
+0249 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 249
+024A 08                INC     R0
+024B E2                MOVX    A,@R0
+024C FF                MOV     R7,A
+024D C007              PUSH    AR7
+024F 7800        R     MOV     R0,#LOW k
+0251 08                INC     R0
+0252 08                INC     R0
+0253 E2                MOVX    A,@R0
+0254 FE                MOV     R6,A
+0255 08                INC     R0
+0256 E2                MOVX    A,@R0
+0257 FF                MOV     R7,A
+0258 7800        R     MOV     R0,#LOW curbuf
+025A E2                MOVX    A,@R0
+025B FB                MOV     R3,A
+025C 08                INC     R0
+025D E2                MOVX    A,@R0
+025E FA                MOV     R2,A
+025F 08                INC     R0
+0260 E2                MOVX    A,@R0
+0261 F9                MOV     R1,A
+0262 8F82              MOV     DPL,R7
+0264 8E83              MOV     DPH,R6
+0266 D0E0              POP     ACC
+0268 120000      E     LCALL   ?C?CSTOPTR
+                                           ; SOURCE LINE # 250
+026B 7800        R     MOV     R0,#LOW cursize
+026D E2                MOVX    A,@R0
+026E FC                MOV     R4,A
+026F 08                INC     R0
+0270 E2                MOVX    A,@R0
+0271 FD                MOV     R5,A
+0272 08                INC     R0
+0273 E2                MOVX    A,@R0
+0274 FE                MOV     R6,A
+0275 08                INC     R0
+0276 E2                MOVX    A,@R0
+0277 FF                MOV     R7,A
+0278 7800        R     MOV     R0,#LOW k
+027A E2                MOVX    A,@R0
+027B FB                MOV     R3,A
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 37  
+
+027C 08                INC     R0
+027D E2                MOVX    A,@R0
+027E F9                MOV     R1,A
+027F 08                INC     R0
+0280 E2                MOVX    A,@R0
+0281 FA                MOV     R2,A
+0282 08                INC     R0
+0283 E2                MOVX    A,@R0
+0284 CB                XCH     A,R3
+0285 F8                MOV     R0,A
+0286 D3                SETB    C
+0287 120000      E     LCALL   ?C?ULCMP
+028A 4006              JC      ?C0068
+028C         ?C0086:
+028C 74FF              MOV     A,#0FFH
+028E 7FFE              MOV     R7,#0FEH
+0290         ?C0089:
+0290 807A              SJMP    ?C0090
+0292         ?C0068:
+                                           ; SOURCE LINE # 251
+0292 7800        R     MOV     R0,#LOW k
+0294 E2                MOVX    A,@R0
+0295 FC                MOV     R4,A
+0296 08                INC     R0
+0297 E2                MOVX    A,@R0
+0298 FD                MOV     R5,A
+0299 08                INC     R0
+029A E2                MOVX    A,@R0
+029B FE                MOV     R6,A
+029C 08                INC     R0
+029D E2                MOVX    A,@R0
+029E 2401              ADD     A,#01H
+02A0 FF                MOV     R7,A
+02A1 E4                CLR     A
+02A2 3E                ADDC    A,R6
+02A3 FE                MOV     R6,A
+02A4 E4                CLR     A
+02A5 3D                ADDC    A,R5
+02A6 FD                MOV     R5,A
+02A7 E4                CLR     A
+02A8 3C                ADDC    A,R4
+02A9 FC                MOV     R4,A
+02AA 7800        R     MOV     R0,#LOW k
+02AC 120000      E     LCALL   ?C?LSTPDATA
+                                           ; SOURCE LINE # 252
+02AF 7800        R     MOV     R0,#LOW j
+02B1 E2                MOVX    A,@R0
+02B2 FC                MOV     R4,A
+02B3 08                INC     R0
+02B4 E2                MOVX    A,@R0
+02B5 FD                MOV     R5,A
+02B6 08                INC     R0
+02B7 E2                MOVX    A,@R0
+02B8 FE                MOV     R6,A
+02B9 08                INC     R0
+02BA E2                MOVX    A,@R0
+02BB 24FF              ADD     A,#0FFH
+02BD FF                MOV     R7,A
+02BE EE                MOV     A,R6
+02BF 34FF              ADDC    A,#0FFH
+02C1 FE                MOV     R6,A
+02C2 ED                MOV     A,R5
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 38  
+
+02C3 34FF              ADDC    A,#0FFH
+02C5 FD                MOV     R5,A
+02C6 EC                MOV     A,R4
+02C7 34FF              ADDC    A,#0FFH
+02C9 FC                MOV     R4,A
+02CA 7800        R     MOV     R0,#LOW i
+02CC E2                MOVX    A,@R0
+02CD FB                MOV     R3,A
+02CE 08                INC     R0
+02CF E2                MOVX    A,@R0
+02D0 F9                MOV     R1,A
+02D1 08                INC     R0
+02D2 E2                MOVX    A,@R0
+02D3 FA                MOV     R2,A
+02D4 08                INC     R0
+02D5 E2                MOVX    A,@R0
+02D6 CB                XCH     A,R3
+02D7 F8                MOV     R0,A
+02D8 C3                CLR     C
+02D9 120000      E     LCALL   ?C?ULCMP
+02DC 5003              JNC     $ + 5H
+02DE 020000      R     LJMP    ?C0065
+                                           ; SOURCE LINE # 253
+02E1 7800        R     MOV     R0,#LOW chksum
+02E3 E2                MOVX    A,@R0
+02E4 7022              JNZ     ?C0069
+02E6 7800        R     MOV     R0,#LOW k
+02E8 E2                MOVX    A,@R0
+02E9 FC                MOV     R4,A
+02EA 08                INC     R0
+02EB E2                MOVX    A,@R0
+02EC FD                MOV     R5,A
+02ED 08                INC     R0
+02EE E2                MOVX    A,@R0
+02EF FE                MOV     R6,A
+02F0 08                INC     R0
+02F1 E2                MOVX    A,@R0
+02F2 24FF              ADD     A,#0FFH
+02F4 FF                MOV     R7,A
+02F5 EE                MOV     A,R6
+02F6 34FF              ADDC    A,#0FFH
+02F8 FE                MOV     R6,A
+02F9 ED                MOV     A,R5
+02FA 34FF              ADDC    A,#0FFH
+02FC FD                MOV     R5,A
+02FD EC                MOV     A,R4
+02FE 34FF              ADDC    A,#0FFH
+0300 FC                MOV     R4,A
+0301 7800        R     MOV     R0,#LOW k
+0303 120000      E     LCALL   ?C?LSTPDATA
+0306 8008              SJMP    ?C0056
+0308         ?C0069:
+0308 74FF              MOV     A,#0FFH
+030A 7FFB              MOV     R7,#0FBH
+030C         ?C0090:
+030C FE                MOV     R6,A
+030D FD                MOV     R5,A
+030E FC                MOV     R4,A
+030F 22                RET     
+                                           ; SOURCE LINE # 254
+0310         ?C0056:
+                                           ; SOURCE LINE # 255
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 39  
+
+0310 7800        R     MOV     R0,#LOW k
+0312 E2                MOVX    A,@R0
+0313 FC                MOV     R4,A
+0314 08                INC     R0
+0315 E2                MOVX    A,@R0
+0316 FD                MOV     R5,A
+0317 08                INC     R0
+0318 E2                MOVX    A,@R0
+0319 FE                MOV     R6,A
+031A 08                INC     R0
+031B E2                MOVX    A,@R0
+031C FF                MOV     R7,A
+                                           ; SOURCE LINE # 256
+031D         ?C0055:
+031D 22                RET     
+             ; FUNCTION _volkovread (END)
+
+             ; FUNCTION _com_read_ready (BEGIN)
+                                           ; SOURCE LINE # 258
+0000 7800        R     MOV     R0,#LOW nch
+0002 EF                MOV     A,R7
+0003 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 259
+                                           ; SOURCE LINE # 260
+0004 E2                MOVX    A,@R0
+0005 FF                MOV     R7,A
+0006 2400        R     ADD     A,#LOW volkov_flag
+0008 F8                MOV     R0,A
+0009 E2                MOVX    A,@R0
+000A 700F              JNZ     ?C0071
+                                           ; SOURCE LINE # 261
+                                           ; SOURCE LINE # 262
+000C 120000      R     LCALL   _com_rbuflen
+000F EF                MOV     A,R7
+0010 D3                SETB    C
+0011 9400              SUBB    A,#00H
+0013 4003              JC      ?C0072
+0015 7F01              MOV     R7,#01H
+0017 22                RET     
+0018         ?C0072:
+0018 7F00              MOV     R7,#00H
+001A 22                RET     
+                                           ; SOURCE LINE # 263
+001B         ?C0071:
+                                           ; SOURCE LINE # 265
+                                           ; SOURCE LINE # 266
+001B 7800        R     MOV     R0,#LOW nch
+001D E2                MOVX    A,@R0
+001E 2400        R     ADD     A,#LOW STOP_flag
+0020 F8                MOV     R0,A
+0021 E2                MOVX    A,@R0
+0022 FF                MOV     R7,A
+                                           ; SOURCE LINE # 267
+                                           ; SOURCE LINE # 268
+0023         ?C0073:
+0023 22                RET     
+             ; FUNCTION _com_read_ready (END)
+
+             ; FUNCTION _get_live_flag (BEGIN)
+                                           ; SOURCE LINE # 269
+;---- Variable 'nch' assigned to Register 'R7' ----
+0000 7400        R     MOV     A,#LOW STOP_echo_flag
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 40  
+
+0002 2F                ADD     A,R7
+0003 F8                MOV     R0,A
+0004 E2                MOVX    A,@R0
+0005 FF                MOV     R7,A
+0006         ?C0076:
+0006 22                RET     
+             ; FUNCTION _get_live_flag (END)
+
+             ; FUNCTION _com_tbuflen (BEGIN)
+                                           ; SOURCE LINE # 270
+;---- Variable 'nch' assigned to Register 'R3' ----
+0000 AB07              MOV     R3,AR7
+0002 EB                MOV     A,R3
+0003 25E0              ADD     A,ACC
+0005 25E0              ADD     A,ACC
+0007 2400        R     ADD     A,#LOW t_out
+0009 F8                MOV     R0,A
+000A 08                INC     R0
+000B 08                INC     R0
+000C 08                INC     R0
+000D E2                MOVX    A,@R0
+000E FA                MOV     R2,A
+000F EF                MOV     A,R7
+0010 25E0              ADD     A,ACC
+0012 25E0              ADD     A,ACC
+0014 2400        R     ADD     A,#LOW t_in
+0016 F8                MOV     R0,A
+0017 08                INC     R0
+0018 08                INC     R0
+0019 08                INC     R0
+001A E2                MOVX    A,@R0
+001B C3                CLR     C
+001C 9A                SUBB    A,R2
+001D FF                MOV     R7,A
+001E         ?C0077:
+001E 22                RET     
+             ; FUNCTION _com_tbuflen (END)
+
+             ; FUNCTION _com_rbuflen (BEGIN)
+                                           ; SOURCE LINE # 271
+;---- Variable 'nch' assigned to Register 'R3' ----
+0000 AB07              MOV     R3,AR7
+0002 EB                MOV     A,R3
+0003 25E0              ADD     A,ACC
+0005 25E0              ADD     A,ACC
+0007 2400        R     ADD     A,#LOW r_out
+0009 F8                MOV     R0,A
+000A 08                INC     R0
+000B 08                INC     R0
+000C 08                INC     R0
+000D E2                MOVX    A,@R0
+000E FA                MOV     R2,A
+000F EF                MOV     A,R7
+0010 25E0              ADD     A,ACC
+0012 25E0              ADD     A,ACC
+0014 2400        R     ADD     A,#LOW r_in
+0016 F8                MOV     R0,A
+0017 08                INC     R0
+0018 08                INC     R0
+0019 08                INC     R0
+001A E2                MOVX    A,@R0
+001B C3                CLR     C
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 41  
+
+001C 9A                SUBB    A,R2
+001D FF                MOV     R7,A
+001E         ?C0078:
+001E 22                RET     
+             ; FUNCTION _com_rbuflen (END)
+
+             ; FUNCTION _com_putchar (BEGIN)
+                                           ; SOURCE LINE # 273
+;---- Variable 'nch' assigned to Register 'R3' ----
+0000 AB07              MOV     R3,AR7
+;---- Variable 'c' assigned to Register 'R5' ----
+                                           ; SOURCE LINE # 274
+                                           ; SOURCE LINE # 275
+0002 AA05              MOV     R2,AR5
+0004 EB                MOV     A,R3
+0005 25E0              ADD     A,ACC
+0007 25E0              ADD     A,ACC
+0009 2400        R     ADD     A,#LOW t_in
+000B F8                MOV     R0,A
+000C 120000      E     LCALL   ?C?LLDIPDATA1
+000F EB                MOV     A,R3
+0010 C4                SWAP    A
+0011 33                RLC     A
+0012 54E0              ANL     A,#0E0H
+0014 2400        R     ADD     A,#LOW tbuf
+0016 2F                ADD     A,R7
+0017 F8                MOV     R0,A
+0018 EA                MOV     A,R2
+0019 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 276
+001A AF03              MOV     R7,AR3
+001C 020000      R     LJMP    _wait_end_of_send
+             ; FUNCTION _com_putchar (END)
+
+             ; FUNCTION _com_getchar (BEGIN)
+                                           ; SOURCE LINE # 279
+;---- Variable 'nch' assigned to Register 'R3' ----
+0000 AB07              MOV     R3,AR7
+                                           ; SOURCE LINE # 280
+                                           ; SOURCE LINE # 281
+0002 EB                MOV     A,R3
+0003 25E0              ADD     A,ACC
+0005 25E0              ADD     A,ACC
+0007 2400        R     ADD     A,#LOW r_out
+0009 F8                MOV     R0,A
+000A 120000      E     LCALL   ?C?LLDIPDATA1
+000D EF                MOV     A,R7
+000E 541F              ANL     A,#01FH
+0010 FF                MOV     R7,A
+0011 EB                MOV     A,R3
+0012 C4                SWAP    A
+0013 33                RLC     A
+0014 54E0              ANL     A,#0E0H
+0016 2400        R     ADD     A,#LOW rbuf
+0018 2F                ADD     A,R7
+0019 F8                MOV     R0,A
+001A E2                MOVX    A,@R0
+001B FF                MOV     R7,A
+                                           ; SOURCE LINE # 282
+001C         ?C0080:
+001C 22                RET     
+             ; FUNCTION _com_getchar (END)
+C51 COMPILER V9.50a   VOLKOV                                                               02/11/2022 18:50:15 PAGE 42  
+
+
+             ; FUNCTION _Set_adr_PLC (BEGIN)
+                                           ; SOURCE LINE # 284
+;---- Variable 'adr' assigned to Register 'R5' ----
+;---- Variable 'nch' assigned to Register 'R7' ----
+                                           ; SOURCE LINE # 285
+                                           ; SOURCE LINE # 286
+0000 7400        R     MOV     A,#LOW AddressPLC
+0002 2F                ADD     A,R7
+0003 F8                MOV     R0,A
+0004 ED                MOV     A,R5
+0005 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 287
+0006 22                RET     
+             ; FUNCTION _Set_adr_PLC (END)
+
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =   2583    ----
+   CONSTANT SIZE    =   ----    ----
+   XDATA SIZE       =   ----    ----
+   PDATA SIZE       =    178      49
+   DATA SIZE        =   ----    ----
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =   ----    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

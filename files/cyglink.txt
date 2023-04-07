@@ -1,0 +1,10 @@
+"D:\Inc\work\silabs\USB_CDC_485_4.5.2\USB_ISR.obj",
+"D:\Inc\work\silabs\USB_CDC_485_4.5.2\USB_Main.obj",
+"D:\Inc\work\silabs\USB_CDC_485_4.5.2\USB_Standard_Requests.obj",
+"D:\Inc\work\silabs\USB_CDC_485_4.5.2\USB_Descriptor.obj",
+"D:\Inc\work\silabs\USB_CDC_485_4.5.2\USB_Class_Requests.obj",
+"D:\Inc\work\silabs\USB_CDC_485_4.5.2\USB_CDC_UART.obj",
+"D:\Inc\work\silabs\USB_CDC_485_4.5.2\Keil_FIFO_RW.LIB",
+"D:\Inc\work\silabs\USB_CDC_485_4.5.2\uart.obj",
+"D:\Inc\work\silabs\USB_CDC_485_4.5.2\extsram.obj",
+"D:\Inc\work\silabs\USB_CDC_485_4.5.2\spi.obj"  TO "D:\Inc\work\silabs\USB_CDC_485_4.5.2\Keil_USB_CDC_skeleton" RS(256) PL(68) PW(78) 

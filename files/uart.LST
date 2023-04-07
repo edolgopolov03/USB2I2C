@@ -1,0 +1,1377 @@
+C51 COMPILER V9.50a   UART                                                                 05/17/2022 15:14:56 PAGE 1   
+
+
+C51 COMPILER V9.50a, COMPILATION OF MODULE UART
+OBJECT MODULE PLACED IN uart.OBJ
+COMPILER INVOKED BY: C:\Keil\C51\BIN\C51.exe uart.c DB OE CD INCDIR(c:\SiLabs\MCU\Inc) COMPACT
+
+line level    source
+
+   1          //-----------------------------------------------------------------------------
+   2          // Includes
+   3          //-----------------------------------------------------------------------------
+   4          #include <stdio.h>
+   5          #include <c8051F340.h>
+   6          #include "USB_Main.h"
+   7          #include "uart.h"
+   8          #include "spi.h"
+   9          #include "extsram.h"
+  10          
+  11          sfr16 TMR2RL    = 0xca;                                 // Timer2 reload value
+  12          sfr16 TMR2              = 0xcc;                                 // Timer2 counter
+  13          
+  14          unsigned char num_sended = 0;
+  15          unsigned char num_recv = 0;
+  16          unsigned char i_flag = 0;
+  17          unsigned char end_int = 0;
+  18          unsigned char inside_interrupt = 1;
+  19          unsigned char wait_ov = 0;
+  20          unsigned char byte_ov = 0;
+  21          unsigned char TIMEOUT_WAIT = 10; // in 10*ms
+  22          unsigned char TIMEOUT_BYTE = 11; // in 100*mks
+  23          long rat_wait = SYSCLK / 12 / 100;
+  24          long rat_byte = SYSCLK / 12 / 10000;
+  25          long wait_time = 10L;                                   // in 10*ms
+  26          long byte_time = 11;                                    // in 100*mks; max = 16 ms;
+  27          
+  28          
+  29          //-----------------------------------------------------------------------------
+  30          void UART0_Init(int baud)
+  31          {
+  32   1        SCON0 = 0x10;                        // 8-bit variable bit rate and RX enabled
+  33   1        if (SYSCLK/baud/2/256 < 1)
+  34   1        {
+  35   2          TH1    = -(SYSCLK/baud/2);
+  36   2          CKCON |= 0x08;                     // Timer1 uses SYSCLK
+  37   2        } 
+  38   1        else if (SYSCLK/baud/2/256 < 4)
+  39   1        {
+  40   2          TH1    = -(SYSCLK/baud/2/4);
+  41   2          CKCON &= 0xF0;                     // Timer1 uses SYSCLK/4
+  42   2          CKCON |= 0x01;
+  43   2        }
+  44   1        else if (SYSCLK/baud/2/256 < 12)
+  45   1        {
+  46   2          TH1    = -(SYSCLK/baud/2/12);
+  47   2          CKCON &= 0xF0;                     // Timer1 uses SYSCLK/12
+  48   2        }
+  49   1        else
+  50   1        {
+  51   2          TH1    = -(SYSCLK/baud/2/48);
+  52   2          CKCON &= 0xF0;                     // Timer1 uses SYSCLK/48
+  53   2          CKCON |= 0x03;
+  54   2        }
+  55   1        TL1   = 0xFF;                        // set Timer1 to overflow immediately
+C51 COMPILER V9.50a   UART                                                                 05/17/2022 15:14:56 PAGE 2   
+
+  56   1        TMOD &= 0x0F;                        // Timer1 in 8-bit autoreload
+  57   1        TMOD |= 0x20;
+  58   1        TR1   = 1;                           // start Timer1
+  59   1        TI0   = 1;                           // indicate TX0 ready
+  60   1      
+  61   1        //InitVolkov(0);
+  62   1        ES0   = 1;                           // Enable UART0 interrupt
+  63   1      }
+  64          
+  65          void UART1_Init(int baud)
+  66          {       
+  67   1                                                                                      // SYSCLK = 48 MHz
+  68   1        SCON1 = 0x10;                                                 // TX and RX enabled
+  69   1        SMOD1 = 0x0c;                                                 // Data length - 8 bits
+  70   1        SBCON1 &= 0xBC;                                               // RESERVED
+  71   1        SBCON1 |= 0x43;                                               // Baudrate generator is enabled Prescaler 0x03 = 1
+  72   1        SBRLH1 = (-SYSCLK/2/baud)>>8;         // High byte of BAUDRATE
+  73   1        SBRLL1 = (-SYSCLK/2/baud);            // Low byte of BAUDRATE
+  74   1        EIE2 |= 0x02;                                                 // Enable UART1 interrupt
+  75   1      }
+  76          
+  77          void INT0_Init(void)
+  78          {       
+  79   1              EX0 = 0x01;                                     // Enable INT0 interrupt
+  80   1              IT0 = 1;
+  81   1              IT01CF = 0x0E;                          // Configuration of ExtInt
+  82   1      }
+  83          
+  84          void Change_baud(void)
+  85          {
+  86   1              UART0_Init((short)(extmas[OUT_PACKAGE]<<8)|(short)extmas[OUT_PACKAGE+1]);
+  87   1              UART1_Init((short)(extmas[OUT_PACKAGE]<<8)|(short)extmas[OUT_PACKAGE+1]);
+  88   1              Finish_int();
+  89   1      
+  90   1      }
+  91          
+  92          void Change_TIMEOUT(void)
+  93          {
+  94   1              TIMEOUT_WAIT = extmas[OUT_PACKAGE];
+  95   1              TIMEOUT_BYTE = extmas[OUT_PACKAGE+1];
+  96   1              Finish_int();
+  97   1      }
+  98          
+  99          //-----------------------------------------------------------------------------
+ 100          // UART0_ISR: UART Interrupt Service Routine
+ 101          //-----------------------------------------------------------------------------
+ 102          
+ 103          void UART0_ISR(void) interrupt INTERRUPT_UART0   
+ 104          {
+ 105   1              if(RI0)
+ 106   1          {
+ 107   2                      if ((inside_interrupt)&&(IN_PACKAGE + extmas[NUM_RECV]<256))
+ 108   2                      {
+ 109   3                              extmas[IN_PACKAGE + extmas[NUM_RECV]] = SBUF0;
+ 110   3                              extmas[NUM_RECV]++;
+ 111   3                              Byte_Set();//TMR2 = 0xffff - (extmas[TIMEOUT_BYTE] * rat_byte);
+ 112   3              }
+ 113   2                      RI0 = 0;
+ 114   2          }
+ 115   1              if(TI0)
+ 116   1              {
+ 117   2                      if (inside_interrupt)
+C51 COMPILER V9.50a   UART                                                                 05/17/2022 15:14:56 PAGE 3   
+
+ 118   2                      {
+ 119   3                              if (num_sended<extmas[NUM_SEND])
+ 120   3                              {
+ 121   4                                      SBUF0 = extmas[OUT_PACKAGE+num_sended];
+ 122   4                                      num_sended++;
+ 123   4                                      Byte_Set();
+ 124   4                              }
+ 125   3                              else {
+ 126   4                                      extmas[NUM_RECV] = 0;
+ 127   4                                      DE0 = 0;
+ 128   4                                      RE0 = 0;
+ 129   4                                      Wait_Set();
+ 130   4                              }
+ 131   3                      }
+ 132   2                      TI0 = 0;
+ 133   2              }
+ 134   1      }
+ 135          
+ 136          //-----------------------------------------------------------------------------
+ 137          // UART1_ISR: UART Interrupt Service Routine
+ 138          //-----------------------------------------------------------------------------
+ 139          
+ 140          void UART1_ISR(void) interrupt INTERRUPT_UART1   
+ 141          {   
+ 142   1          if((SCON1 & 1) == 1)
+ 143   1          {
+ 144   2                      if ((inside_interrupt)&&(IN_PACKAGE + extmas[NUM_RECV]<256))
+ 145   2                      {
+ 146   3                              extmas[IN_PACKAGE + extmas[NUM_RECV]] = SBUF1;
+ 147   3                              extmas[NUM_RECV]++;
+ 148   3                              Byte_Set();
+ 149   3              }
+ 150   2                      SCON1 &= ~0x01;
+ 151   2          }
+ 152   1              if((SCON1 & 2) == 2)
+ 153   1              {
+ 154   2                      if (inside_interrupt)
+ 155   2                      {
+ 156   3                              if (num_sended<extmas[NUM_SEND])
+ 157   3                              {
+ 158   4                                      SBUF1 = extmas[OUT_PACKAGE+num_sended];
+ 159   4                                      num_sended++;
+ 160   4                                      Byte_Set();
+ 161   4                              }
+ 162   3                              else {
+ 163   4                                      extmas[NUM_RECV] = 0;
+ 164   4                                      DE1 = 0;
+ 165   4                                      RE1 = 0;
+ 166   4                                      Wait_Set();
+ 167   4                              }
+ 168   3                      }
+ 169   2                      SCON1 &= ~2;
+ 170   2              }
+ 171   1      }
+ 172          
+ 173          void INT0_ISR(void) interrupt INTERRUPT_INT0
+ 174          {
+ 175   1              inside_interrupt = 1;
+ 176   1              i_flag = 1;
+ 177   1              end_int = 0;
+ 178   1              if (extmas[TYPE_COM] == 1)
+ 179   1              {
+C51 COMPILER V9.50a   UART                                                                 05/17/2022 15:14:56 PAGE 4   
+
+ 180   2                      num_sended = 0;
+ 181   2                      /*ttimes = 0;                                                   // number of overflows timer2
+ 182   2                      TMR2 = 0xffff - (extmas[TIMEOUT_BYTE] * rat_byte);*/
+ 183   2                      Byte_Set();
+ 184   2                      if (extmas[N_UART] == 1) 
+ 185   2                      {
+ 186   3                              DE1 = 1;                                                // 1 writing if both then echo
+ 187   3                              RE1 = 1;                                                // 0 reading if both then echo
+ 188   3                              SCON1 |= 2;
+ 189   3                      } else if (extmas[N_UART] == 0)
+ 190   2                      {       
+ 191   3                              DE0 = 1;                                                // 1 writing if both then echo
+ 192   3                              RE0 = 1;                                                // 0 reading if both then echo
+ 193   3                              TI0 = 1;
+ 194   3                      }
+ 195   2              } else if (extmas[TYPE_COM] == 2)       Change_baud(); 
+ 196   1                else if (extmas[TYPE_COM] == 3)       Change_TIMEOUT();
+ 197   1      }
+ 198          
+ 199          //-----------------------------------------------------------------------------
+ 200          // Timer_Init
+ 201          //-----------------------------------------------------------------------------
+ 202          void Timer_Init(void)
+ 203          {
+ 204   1              TMR2CN   = 0x00;                                        // Stop Timer2; Clear TF2;
+ 205   1      
+ 206   1              CKCON   &= ~0xF0;                                       // Timer2 clocked based on T2XCLK;
+ 207   1              TMR2RL   = 0;                                           // Initialize reload value
+ 208   1              TMR2     = 0xffff;                                      // Set to reload immediately
+ 209   1              TR2              = 1;                                           // Start Timer2
+ 210   1      }
+ 211          
+ 212          
+ 213          //-----------------------------------------------------------------------------
+ 214          // Timer_Set
+ 215          //-----------------------------------------------------------------------------
+ 216          void Wait_Set(void)
+ 217          {
+ 218   1              wait_time = TIMEOUT_WAIT;
+ 219   1              TMR2 = 0xFFFF - (wait_time * rat_wait);
+ 220   1              wait_ov = ((wait_time * rat_wait)/0xFFFF);
+ 221   1      }
+ 222          
+ 223          void Byte_Set(void)
+ 224          {
+ 225   1              byte_time = TIMEOUT_BYTE;
+ 226   1              TMR2 = 0xFFFF - (byte_time * rat_byte);
+ 227   1              byte_ov = ((byte_time * rat_byte)/0xFFFF);
+ 228   1      }
+ 229          
+ 230          //-----------------------------------------------------------------------------
+ 231          // Timer2_ISR
+ 232          //-----------------------------------------------------------------------------
+ 233          
+ 234          void Timer2_ISR(void) interrupt 5
+ 235          {
+ 236   1              TF2H = 0;                                                       // Clear Timer2 interrupt flag
+ 237   1              if (inside_interrupt)
+ 238   1              {
+ 239   2                      if (wait_ov > 0)                wait_ov--;                                      // if wait_time more than maximum overflow time
+ 240   2                      else if (byte_ov > 0)   byte_ov--;
+ 241   2                      else
+C51 COMPILER V9.50a   UART                                                                 05/17/2022 15:14:56 PAGE 5   
+
+ 242   2                      {
+ 243   3                              if (extmas[N_UART] == 1) 
+ 244   3                              {
+ 245   4                                      DE1 = 1;                                                // 1 writing if both then echo
+ 246   4                                      RE1 = 1;                                                // 0 reading if both then echo
+ 247   4                              } else if (extmas[N_UART] == 0)
+ 248   3                              {       
+ 249   4                                      DE0 = 1;                                                // 1 writing if both then echo
+ 250   4                                      RE0 = 1;                                                // 0 reading if both then echo
+ 251   4                              }
+ 252   3                              Finish_int();
+ 253   3                      }
+ 254   2              }
+ 255   1      }
+ 256          
+ 257          void Finish_int(void)
+ 258          {
+ 259   1                              inside_interrupt = 0;
+ 260   1                              end_int = 1;    
+ 261   1      }
+C51 COMPILER V9.50a   UART                                                                 05/17/2022 15:14:56 PAGE 6   
+
+ASSEMBLY LISTING OF GENERATED OBJECT CODE
+
+
+             ; FUNCTION _UART0_Init (BEGIN)
+                                           ; SOURCE LINE # 30
+0000 7800        R     MOV     R0,#LOW baud
+0002 EE                MOV     A,R6
+0003 F2                MOVX    @R0,A
+0004 08                INC     R0
+0005 EF                MOV     A,R7
+0006 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 31
+                                           ; SOURCE LINE # 32
+0007 759810            MOV     SCON0,#010H
+                                           ; SOURCE LINE # 33
+000A AB07              MOV     R3,AR7
+000C AA06              MOV     R2,AR6
+000E EA                MOV     A,R2
+000F 33                RLC     A
+0010 95E0              SUBB    A,ACC
+0012 F9                MOV     R1,A
+0013 F8                MOV     R0,A
+0014 7F00              MOV     R7,#00H
+0016 7E6C              MOV     R6,#06CH
+0018 7DDC              MOV     R5,#0DCH
+001A 7C02              MOV     R4,#02H
+001C 120000      E     LCALL   ?C?SLDIV
+001F E4                CLR     A
+0020 7B02              MOV     R3,#02H
+0022 FA                MOV     R2,A
+0023 F9                MOV     R1,A
+0024 F8                MOV     R0,A
+0025 120000      E     LCALL   ?C?SLDIV
+0028 E4                CLR     A
+0029 FB                MOV     R3,A
+002A 7A01              MOV     R2,#01H
+002C F9                MOV     R1,A
+002D F8                MOV     R0,A
+002E 120000      E     LCALL   ?C?SLDIV
+0031 E4                CLR     A
+0032 7B01              MOV     R3,#01H
+0034 FA                MOV     R2,A
+0035 F9                MOV     R1,A
+0036 F8                MOV     R0,A
+0037 D3                SETB    C
+0038 120000      E     LCALL   ?C?SLCMP
+003B 402E              JC      ?C0001
+                                           ; SOURCE LINE # 34
+                                           ; SOURCE LINE # 35
+003D 7800        R     MOV     R0,#LOW baud
+003F E2                MOVX    A,@R0
+0040 FE                MOV     R6,A
+0041 08                INC     R0
+0042 E2                MOVX    A,@R0
+0043 FB                MOV     R3,A
+0044 AA06              MOV     R2,AR6
+0046 EA                MOV     A,R2
+0047 33                RLC     A
+0048 95E0              SUBB    A,ACC
+004A F9                MOV     R1,A
+004B F8                MOV     R0,A
+004C 7F00              MOV     R7,#00H
+C51 COMPILER V9.50a   UART                                                                 05/17/2022 15:14:56 PAGE 7   
+
+004E 7E6C              MOV     R6,#06CH
+0050 7DDC              MOV     R5,#0DCH
+0052 7C02              MOV     R4,#02H
+0054 120000      E     LCALL   ?C?SLDIV
+0057 E4                CLR     A
+0058 7B02              MOV     R3,#02H
+005A FA                MOV     R2,A
+005B F9                MOV     R1,A
+005C F8                MOV     R0,A
+005D 120000      E     LCALL   ?C?SLDIV
+0060 120000      E     LCALL   ?C?LNEG
+0063 8F8D              MOV     TH1,R7
+                                           ; SOURCE LINE # 36
+0065 438E08            ORL     CKCON,#08H
+                                           ; SOURCE LINE # 37
+0068 020000      R     LJMP    ?C0002
+006B         ?C0001:
+                                           ; SOURCE LINE # 38
+006B 7800        R     MOV     R0,#LOW baud
+006D E2                MOVX    A,@R0
+006E FE                MOV     R6,A
+006F 08                INC     R0
+0070 E2                MOVX    A,@R0
+0071 FB                MOV     R3,A
+0072 AA06              MOV     R2,AR6
+0074 EA                MOV     A,R2
+0075 33                RLC     A
+0076 95E0              SUBB    A,ACC
+0078 F9                MOV     R1,A
+0079 F8                MOV     R0,A
+007A 7F00              MOV     R7,#00H
+007C 7E6C              MOV     R6,#06CH
+007E 7DDC              MOV     R5,#0DCH
+0080 7C02              MOV     R4,#02H
+0082 120000      E     LCALL   ?C?SLDIV
+0085 E4                CLR     A
+0086 7B02              MOV     R3,#02H
+0088 FA                MOV     R2,A
+0089 F9                MOV     R1,A
+008A F8                MOV     R0,A
+008B 120000      E     LCALL   ?C?SLDIV
+008E E4                CLR     A
+008F FB                MOV     R3,A
+0090 7A01              MOV     R2,#01H
+0092 F9                MOV     R1,A
+0093 F8                MOV     R0,A
+0094 120000      E     LCALL   ?C?SLDIV
+0097 E4                CLR     A
+0098 7B04              MOV     R3,#04H
+009A FA                MOV     R2,A
+009B F9                MOV     R1,A
+009C F8                MOV     R0,A
+009D D3                SETB    C
+009E 120000      E     LCALL   ?C?SLCMP
+00A1 403A              JC      ?C0003
+                                           ; SOURCE LINE # 39
+                                           ; SOURCE LINE # 40
+00A3 7800        R     MOV     R0,#LOW baud
+00A5 E2                MOVX    A,@R0
+00A6 FE                MOV     R6,A
+00A7 08                INC     R0
+00A8 E2                MOVX    A,@R0
+C51 COMPILER V9.50a   UART                                                                 05/17/2022 15:14:56 PAGE 8   
+
+00A9 FB                MOV     R3,A
+00AA AA06              MOV     R2,AR6
+00AC EA                MOV     A,R2
+00AD 33                RLC     A
+00AE 95E0              SUBB    A,ACC
+00B0 F9                MOV     R1,A
+00B1 F8                MOV     R0,A
+00B2 7F00              MOV     R7,#00H
+00B4 7E6C              MOV     R6,#06CH
+00B6 7DDC              MOV     R5,#0DCH
+00B8 7C02              MOV     R4,#02H
+00BA 120000      E     LCALL   ?C?SLDIV
+00BD E4                CLR     A
+00BE 7B02              MOV     R3,#02H
+00C0 FA                MOV     R2,A
+00C1 F9                MOV     R1,A
+00C2 F8                MOV     R0,A
+00C3 120000      E     LCALL   ?C?SLDIV
+00C6 E4                CLR     A
+00C7 7B04              MOV     R3,#04H
+00C9 FA                MOV     R2,A
+00CA F9                MOV     R1,A
+00CB F8                MOV     R0,A
+00CC 120000      E     LCALL   ?C?SLDIV
+00CF 120000      E     LCALL   ?C?LNEG
+00D2 8F8D              MOV     TH1,R7
+                                           ; SOURCE LINE # 41
+00D4 538EF0            ANL     CKCON,#0F0H
+                                           ; SOURCE LINE # 42
+00D7 438E01            ORL     CKCON,#01H
+                                           ; SOURCE LINE # 43
+00DA 020000      R     LJMP    ?C0002
+00DD         ?C0003:
+                                           ; SOURCE LINE # 44
+00DD 7800        R     MOV     R0,#LOW baud
+00DF E2                MOVX    A,@R0
+00E0 FE                MOV     R6,A
+00E1 08                INC     R0
+00E2 E2                MOVX    A,@R0
+00E3 FB                MOV     R3,A
+00E4 AA06              MOV     R2,AR6
+00E6 EA                MOV     A,R2
+00E7 33                RLC     A
+00E8 95E0              SUBB    A,ACC
+00EA F9                MOV     R1,A
+00EB F8                MOV     R0,A
+00EC 7F00              MOV     R7,#00H
+00EE 7E6C              MOV     R6,#06CH
+00F0 7DDC              MOV     R5,#0DCH
+00F2 7C02              MOV     R4,#02H
+00F4 120000      E     LCALL   ?C?SLDIV
+00F7 E4                CLR     A
+00F8 7B02              MOV     R3,#02H
+00FA FA                MOV     R2,A
+00FB F9                MOV     R1,A
+00FC F8                MOV     R0,A
+00FD 120000      E     LCALL   ?C?SLDIV
+0100 E4                CLR     A
+0101 FB                MOV     R3,A
+0102 7A01              MOV     R2,#01H
+0104 F9                MOV     R1,A
+0105 F8                MOV     R0,A
+C51 COMPILER V9.50a   UART                                                                 05/17/2022 15:14:56 PAGE 9   
+
+0106 120000      E     LCALL   ?C?SLDIV
+0109 E4                CLR     A
+010A 7B0C              MOV     R3,#0CH
+010C FA                MOV     R2,A
+010D F9                MOV     R1,A
+010E F8                MOV     R0,A
+010F D3                SETB    C
+0110 120000      E     LCALL   ?C?SLCMP
+0113 7800        R     MOV     R0,#LOW baud
+0115 E2                MOVX    A,@R0
+0116 FE                MOV     R6,A
+0117 08                INC     R0
+0118 E2                MOVX    A,@R0
+0119 FB                MOV     R3,A
+011A 402F              JC      ?C0005
+                                           ; SOURCE LINE # 45
+                                           ; SOURCE LINE # 46
+011C AA06              MOV     R2,AR6
+011E EA                MOV     A,R2
+011F 33                RLC     A
+0120 95E0              SUBB    A,ACC
+0122 F9                MOV     R1,A
+0123 F8                MOV     R0,A
+0124 7F00              MOV     R7,#00H
+0126 7E6C              MOV     R6,#06CH
+0128 7DDC              MOV     R5,#0DCH
+012A 7C02              MOV     R4,#02H
+012C 120000      E     LCALL   ?C?SLDIV
+012F E4                CLR     A
+0130 7B02              MOV     R3,#02H
+0132 FA                MOV     R2,A
+0133 F9                MOV     R1,A
+0134 F8                MOV     R0,A
+0135 120000      E     LCALL   ?C?SLDIV
+0138 E4                CLR     A
+0139 7B0C              MOV     R3,#0CH
+013B FA                MOV     R2,A
+013C F9                MOV     R1,A
+013D F8                MOV     R0,A
+013E 120000      E     LCALL   ?C?SLDIV
+0141 120000      E     LCALL   ?C?LNEG
+0144 8F8D              MOV     TH1,R7
+                                           ; SOURCE LINE # 47
+0146 538EF0            ANL     CKCON,#0F0H
+                                           ; SOURCE LINE # 48
+0149 8030              SJMP    ?C0002
+014B         ?C0005:
+                                           ; SOURCE LINE # 50
+                                           ; SOURCE LINE # 51
+014B AA06              MOV     R2,AR6
+014D EA                MOV     A,R2
+014E 33                RLC     A
+014F 95E0              SUBB    A,ACC
+0151 F9                MOV     R1,A
+0152 F8                MOV     R0,A
+0153 7F00              MOV     R7,#00H
+0155 7E6C              MOV     R6,#06CH
+0157 7DDC              MOV     R5,#0DCH
+0159 7C02              MOV     R4,#02H
+015B 120000      E     LCALL   ?C?SLDIV
+015E E4                CLR     A
+015F 7B02              MOV     R3,#02H
+C51 COMPILER V9.50a   UART                                                                 05/17/2022 15:14:56 PAGE 10  
+
+0161 FA                MOV     R2,A
+0162 F9                MOV     R1,A
+0163 F8                MOV     R0,A
+0164 120000      E     LCALL   ?C?SLDIV
+0167 E4                CLR     A
+0168 7B30              MOV     R3,#030H
+016A FA                MOV     R2,A
+016B F9                MOV     R1,A
+016C F8                MOV     R0,A
+016D 120000      E     LCALL   ?C?SLDIV
+0170 120000      E     LCALL   ?C?LNEG
+0173 8F8D              MOV     TH1,R7
+                                           ; SOURCE LINE # 52
+0175 538EF0            ANL     CKCON,#0F0H
+                                           ; SOURCE LINE # 53
+0178 438E03            ORL     CKCON,#03H
+                                           ; SOURCE LINE # 54
+017B         ?C0002:
+                                           ; SOURCE LINE # 55
+017B 758BFF            MOV     TL1,#0FFH
+                                           ; SOURCE LINE # 56
+017E 53890F            ANL     TMOD,#0FH
+                                           ; SOURCE LINE # 57
+0181 438920            ORL     TMOD,#020H
+                                           ; SOURCE LINE # 58
+0184 D28E              SETB    TR1
+                                           ; SOURCE LINE # 59
+0186 D299              SETB    TI0
+                                           ; SOURCE LINE # 62
+0188 D2AC              SETB    ES0
+                                           ; SOURCE LINE # 63
+018A 22                RET     
+             ; FUNCTION _UART0_Init (END)
+
+             ; FUNCTION _UART1_Init (BEGIN)
+                                           ; SOURCE LINE # 65
+0000 7800        R     MOV     R0,#LOW baud
+0002 EE                MOV     A,R6
+0003 F2                MOVX    @R0,A
+0004 08                INC     R0
+0005 EF                MOV     A,R7
+0006 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 66
+                                           ; SOURCE LINE # 68
+0007 75D210            MOV     SCON1,#010H
+                                           ; SOURCE LINE # 69
+000A 75E50C            MOV     SMOD1,#0CH
+                                           ; SOURCE LINE # 70
+000D 53ACBC            ANL     SBCON1,#0BCH
+                                           ; SOURCE LINE # 71
+0010 43AC43            ORL     SBCON1,#043H
+                                           ; SOURCE LINE # 72
+0013 18                DEC     R0
+0014 E2                MOVX    A,@R0
+0015 FE                MOV     R6,A
+0016 08                INC     R0
+0017 E2                MOVX    A,@R0
+0018 FB                MOV     R3,A
+0019 AA06              MOV     R2,AR6
+001B EA                MOV     A,R2
+001C 33                RLC     A
+001D 95E0              SUBB    A,ACC
+C51 COMPILER V9.50a   UART                                                                 05/17/2022 15:14:56 PAGE 11  
+
+001F F9                MOV     R1,A
+0020 F8                MOV     R0,A
+0021 7F00              MOV     R7,#00H
+0023 7ECA              MOV     R6,#0CAH
+0025 7D91              MOV     R5,#091H
+0027 7CFE              MOV     R4,#0FEH
+0029 120000      E     LCALL   ?C?SLDIV
+002C 7808              MOV     R0,#08H
+002E 120000      E     LCALL   ?C?SLSHR
+0031 8FB5              MOV     SBRLH1,R7
+                                           ; SOURCE LINE # 73
+0033 7800        R     MOV     R0,#LOW baud
+0035 E2                MOVX    A,@R0
+0036 FE                MOV     R6,A
+0037 08                INC     R0
+0038 E2                MOVX    A,@R0
+0039 FB                MOV     R3,A
+003A AA06              MOV     R2,AR6
+003C EA                MOV     A,R2
+003D 33                RLC     A
+003E 95E0              SUBB    A,ACC
+0040 F9                MOV     R1,A
+0041 F8                MOV     R0,A
+0042 7F00              MOV     R7,#00H
+0044 7ECA              MOV     R6,#0CAH
+0046 7D91              MOV     R5,#091H
+0048 7CFE              MOV     R4,#0FEH
+004A 120000      E     LCALL   ?C?SLDIV
+004D 8FB4              MOV     SBRLL1,R7
+                                           ; SOURCE LINE # 74
+004F 43E702            ORL     EIE2,#02H
+                                           ; SOURCE LINE # 75
+0052 22                RET     
+             ; FUNCTION _UART1_Init (END)
+
+             ; FUNCTION INT0_Init (BEGIN)
+                                           ; SOURCE LINE # 77
+                                           ; SOURCE LINE # 78
+                                           ; SOURCE LINE # 79
+0000 D2A8              SETB    EX0
+                                           ; SOURCE LINE # 80
+0002 D288              SETB    IT0
+                                           ; SOURCE LINE # 81
+0004 75E40E            MOV     IT01CF,#0EH
+                                           ; SOURCE LINE # 82
+0007 22                RET     
+             ; FUNCTION INT0_Init (END)
+
+             ; FUNCTION Change_baud (BEGIN)
+                                           ; SOURCE LINE # 84
+                                           ; SOURCE LINE # 85
+                                           ; SOURCE LINE # 86
+0000 900000      E     MOV     DPTR,#extmas+04H
+0003 E0                MOVX    A,@DPTR
+0004 FE                MOV     R6,A
+0005 A3                INC     DPTR
+0006 E0                MOVX    A,@DPTR
+0007 FD                MOV     R5,A
+0008 ED                MOV     A,R5
+0009 FF                MOV     R7,A
+000A 120000      R     LCALL   _UART0_Init
+                                           ; SOURCE LINE # 87
+C51 COMPILER V9.50a   UART                                                                 05/17/2022 15:14:56 PAGE 12  
+
+000D 900000      E     MOV     DPTR,#extmas+04H
+0010 E0                MOVX    A,@DPTR
+0011 FE                MOV     R6,A
+0012 A3                INC     DPTR
+0013 E0                MOVX    A,@DPTR
+0014 FD                MOV     R5,A
+0015 ED                MOV     A,R5
+0016 FF                MOV     R7,A
+0017 120000      R     LCALL   _UART1_Init
+                                           ; SOURCE LINE # 88
+001A 020000      R     LJMP    Finish_int
+             ; FUNCTION Change_baud (END)
+
+             ; FUNCTION Change_TIMEOUT (BEGIN)
+                                           ; SOURCE LINE # 92
+                                           ; SOURCE LINE # 93
+                                           ; SOURCE LINE # 94
+0000 900000      E     MOV     DPTR,#extmas+04H
+0003 E0                MOVX    A,@DPTR
+0004 7800        R     MOV     R0,#LOW TIMEOUT_WAIT
+0006 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 95
+0007 A3                INC     DPTR
+0008 E0                MOVX    A,@DPTR
+0009 18                DEC     R0
+000A F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 96
+000B 020000      R     LJMP    Finish_int
+             ; FUNCTION Change_TIMEOUT (END)
+
+             ; FUNCTION UART0_ISR (BEGIN)
+0000 C0E0              PUSH    ACC
+0002 C0F0              PUSH    B
+0004 C083              PUSH    DPH
+0006 C082              PUSH    DPL
+0008 C0D0              PUSH    PSW
+000A 75D000            MOV     PSW,#00H
+000D C000              PUSH    AR0
+000F C001              PUSH    AR1
+0011 C002              PUSH    AR2
+0013 C003              PUSH    AR3
+0015 C004              PUSH    AR4
+0017 C005              PUSH    AR5
+0019 C006              PUSH    AR6
+001B C007              PUSH    AR7
+                                           ; SOURCE LINE # 103
+                                           ; SOURCE LINE # 105
+001D 309825            JNB     RI0,?C0012
+                                           ; SOURCE LINE # 106
+                                           ; SOURCE LINE # 107
+0020 7800        R     MOV     R0,#LOW inside_interrupt
+0022 E2                MOVX    A,@R0
+0023 601E              JZ      ?C0013
+0025 900000      E     MOV     DPTR,#extmas+080H
+0028 E0                MOVX    A,@DPTR
+0029 2481              ADD     A,#081H
+002B E4                CLR     A
+002C 33                RLC     A
+002D C3                CLR     C
+002E 6480              XRL     A,#080H
+0030 9481              SUBB    A,#081H
+0032 500F              JNC     ?C0013
+C51 COMPILER V9.50a   UART                                                                 05/17/2022 15:14:56 PAGE 13  
+
+                                           ; SOURCE LINE # 108
+                                           ; SOURCE LINE # 109
+0034 E0                MOVX    A,@DPTR
+0035 2400        E     ADD     A,#LOW extmas+081H
+0037 F582              MOV     DPL,A
+0039 E4                CLR     A
+003A 3400        E     ADDC    A,#HIGH extmas+081H
+003C F583              MOV     DPH,A
+003E E599              MOV     A,SBUF0
+                                           ; SOURCE LINE # 110
+                                           ; SOURCE LINE # 111
+0040 120000      R     LCALL   L?0049
+                                           ; SOURCE LINE # 112
+0043         ?C0013:
+                                           ; SOURCE LINE # 113
+0043 C298              CLR     RI0
+                                           ; SOURCE LINE # 114
+0045         ?C0012:
+                                           ; SOURCE LINE # 115
+0045 309935            JNB     TI0,?C0018
+                                           ; SOURCE LINE # 116
+                                           ; SOURCE LINE # 117
+0048 7800        R     MOV     R0,#LOW inside_interrupt
+004A E2                MOVX    A,@R0
+004B 602E              JZ      ?C0015
+                                           ; SOURCE LINE # 118
+                                           ; SOURCE LINE # 119
+004D 900000      E     MOV     DPTR,#extmas+02H
+0050 E0                MOVX    A,@DPTR
+0051 FF                MOV     R7,A
+0052 7800        R     MOV     R0,#LOW num_sended
+0054 E2                MOVX    A,@R0
+0055 FE                MOV     R6,A
+0056 C3                CLR     C
+0057 9F                SUBB    A,R7
+0058 5015              JNC     ?C0016
+                                           ; SOURCE LINE # 120
+                                           ; SOURCE LINE # 121
+005A 7400        E     MOV     A,#LOW extmas+04H
+005C 2E                ADD     A,R6
+005D F582              MOV     DPL,A
+005F E4                CLR     A
+0060 3400        E     ADDC    A,#HIGH extmas+04H
+0062 F583              MOV     DPH,A
+0064 E0                MOVX    A,@DPTR
+0065 F599              MOV     SBUF0,A
+                                           ; SOURCE LINE # 122
+0067 E2                MOVX    A,@R0
+0068 04                INC     A
+0069 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 123
+006A 120000      R     LCALL   Byte_Set
+                                           ; SOURCE LINE # 124
+006D 800C              SJMP    ?C0015
+006F         ?C0016:
+                                           ; SOURCE LINE # 125
+                                           ; SOURCE LINE # 126
+006F 900000      E     MOV     DPTR,#extmas+080H
+0072 E4                CLR     A
+0073 F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 127
+0074 C292              CLR     DE0
+C51 COMPILER V9.50a   UART                                                                 05/17/2022 15:14:56 PAGE 14  
+
+                                           ; SOURCE LINE # 128
+0076 C291              CLR     RE0
+                                           ; SOURCE LINE # 129
+0078 120000      R     LCALL   Wait_Set
+                                           ; SOURCE LINE # 130
+                                           ; SOURCE LINE # 131
+007B         ?C0015:
+                                           ; SOURCE LINE # 132
+007B C299              CLR     TI0
+                                           ; SOURCE LINE # 133
+                                           ; SOURCE LINE # 134
+007D         ?C0018:
+007D D007              POP     AR7
+007F D006              POP     AR6
+0081 D005              POP     AR5
+0083 D004              POP     AR4
+0085 D003              POP     AR3
+0087 D002              POP     AR2
+0089 D001              POP     AR1
+008B D000              POP     AR0
+008D D0D0              POP     PSW
+008F D082              POP     DPL
+0091 D083              POP     DPH
+0093 D0F0              POP     B
+0095 D0E0              POP     ACC
+0097 32                RETI    
+             ; FUNCTION UART0_ISR (END)
+
+             ; FUNCTION UART1_ISR (BEGIN)
+0000 C0E0              PUSH    ACC
+0002 C0F0              PUSH    B
+0004 C083              PUSH    DPH
+0006 C082              PUSH    DPL
+0008 C0D0              PUSH    PSW
+000A 75D000            MOV     PSW,#00H
+000D C000              PUSH    AR0
+000F C001              PUSH    AR1
+0011 C002              PUSH    AR2
+0013 C003              PUSH    AR3
+0015 C004              PUSH    AR4
+0017 C005              PUSH    AR5
+0019 C006              PUSH    AR6
+001B C007              PUSH    AR7
+                                           ; SOURCE LINE # 140
+                                           ; SOURCE LINE # 142
+001D E5D2              MOV     A,SCON1
+001F 30E026            JNB     ACC.0,?C0019
+                                           ; SOURCE LINE # 143
+                                           ; SOURCE LINE # 144
+0022 7800        R     MOV     R0,#LOW inside_interrupt
+0024 E2                MOVX    A,@R0
+0025 601E              JZ      ?C0020
+0027 900000      E     MOV     DPTR,#extmas+080H
+002A E0                MOVX    A,@DPTR
+002B 2481              ADD     A,#081H
+002D E4                CLR     A
+002E 33                RLC     A
+002F C3                CLR     C
+0030 6480              XRL     A,#080H
+0032 9481              SUBB    A,#081H
+0034 500F              JNC     ?C0020
+                                           ; SOURCE LINE # 145
+C51 COMPILER V9.50a   UART                                                                 05/17/2022 15:14:56 PAGE 15  
+
+                                           ; SOURCE LINE # 146
+0036 E0                MOVX    A,@DPTR
+0037 2400        E     ADD     A,#LOW extmas+081H
+0039 F582              MOV     DPL,A
+003B E4                CLR     A
+003C 3400        E     ADDC    A,#HIGH extmas+081H
+003E F583              MOV     DPH,A
+0040 E5D3              MOV     A,SBUF1
+                                           ; SOURCE LINE # 147
+                                           ; SOURCE LINE # 148
+0042 120000      R     LCALL   L?0049
+                                           ; SOURCE LINE # 149
+0045         ?C0020:
+                                           ; SOURCE LINE # 150
+0045 53D2FE            ANL     SCON1,#0FEH
+                                           ; SOURCE LINE # 151
+0048         ?C0019:
+                                           ; SOURCE LINE # 152
+0048 E5D2              MOV     A,SCON1
+004A 30E136            JNB     ACC.1,?C0025
+                                           ; SOURCE LINE # 153
+                                           ; SOURCE LINE # 154
+004D 7800        R     MOV     R0,#LOW inside_interrupt
+004F E2                MOVX    A,@R0
+0050 602E              JZ      ?C0022
+                                           ; SOURCE LINE # 155
+                                           ; SOURCE LINE # 156
+0052 900000      E     MOV     DPTR,#extmas+02H
+0055 E0                MOVX    A,@DPTR
+0056 FF                MOV     R7,A
+0057 7800        R     MOV     R0,#LOW num_sended
+0059 E2                MOVX    A,@R0
+005A FE                MOV     R6,A
+005B C3                CLR     C
+005C 9F                SUBB    A,R7
+005D 5015              JNC     ?C0023
+                                           ; SOURCE LINE # 157
+                                           ; SOURCE LINE # 158
+005F 7400        E     MOV     A,#LOW extmas+04H
+0061 2E                ADD     A,R6
+0062 F582              MOV     DPL,A
+0064 E4                CLR     A
+0065 3400        E     ADDC    A,#HIGH extmas+04H
+0067 F583              MOV     DPH,A
+0069 E0                MOVX    A,@DPTR
+006A F5D3              MOV     SBUF1,A
+                                           ; SOURCE LINE # 159
+006C E2                MOVX    A,@R0
+006D 04                INC     A
+006E F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 160
+006F 120000      R     LCALL   Byte_Set
+                                           ; SOURCE LINE # 161
+0072 800C              SJMP    ?C0022
+0074         ?C0023:
+                                           ; SOURCE LINE # 162
+                                           ; SOURCE LINE # 163
+0074 900000      E     MOV     DPTR,#extmas+080H
+0077 E4                CLR     A
+0078 F0                MOVX    @DPTR,A
+                                           ; SOURCE LINE # 164
+0079 C295              CLR     DE1
+C51 COMPILER V9.50a   UART                                                                 05/17/2022 15:14:56 PAGE 16  
+
+                                           ; SOURCE LINE # 165
+007B C294              CLR     RE1
+                                           ; SOURCE LINE # 166
+007D 120000      R     LCALL   Wait_Set
+                                           ; SOURCE LINE # 167
+                                           ; SOURCE LINE # 168
+0080         ?C0022:
+                                           ; SOURCE LINE # 169
+0080 53D2FD            ANL     SCON1,#0FDH
+                                           ; SOURCE LINE # 170
+                                           ; SOURCE LINE # 171
+0083         ?C0025:
+0083 D007              POP     AR7
+0085 D006              POP     AR6
+0087 D005              POP     AR5
+0089 D004              POP     AR4
+008B D003              POP     AR3
+008D D002              POP     AR2
+008F D001              POP     AR1
+0091 D000              POP     AR0
+0093 D0D0              POP     PSW
+0095 D082              POP     DPL
+0097 D083              POP     DPH
+0099 D0F0              POP     B
+009B D0E0              POP     ACC
+009D 32                RETI    
+             ; FUNCTION UART1_ISR (END)
+
+             ; FUNCTION INT0_ISR (BEGIN)
+0000 C0E0              PUSH    ACC
+0002 C0F0              PUSH    B
+0004 C083              PUSH    DPH
+0006 C082              PUSH    DPL
+0008 C0D0              PUSH    PSW
+000A 75D000            MOV     PSW,#00H
+000D C000              PUSH    AR0
+000F C001              PUSH    AR1
+0011 C002              PUSH    AR2
+0013 C003              PUSH    AR3
+0015 C004              PUSH    AR4
+0017 C005              PUSH    AR5
+0019 C006              PUSH    AR6
+001B C007              PUSH    AR7
+                                           ; SOURCE LINE # 173
+                                           ; SOURCE LINE # 175
+001D 7800        R     MOV     R0,#LOW inside_interrupt
+001F 7401              MOV     A,#01H
+0021 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 176
+0022 7800        R     MOV     R0,#LOW i_flag
+0024 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 177
+0025 18                DEC     R0
+0026 E4                CLR     A
+0027 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 178
+0028 900000      E     MOV     DPTR,#extmas
+002B E0                MOVX    A,@DPTR
+002C 6401              XRL     A,#01H
+002E 7024              JNZ     ?C0026
+                                           ; SOURCE LINE # 179
+                                           ; SOURCE LINE # 180
+C51 COMPILER V9.50a   UART                                                                 05/17/2022 15:14:56 PAGE 17  
+
+0030 7800        R     MOV     R0,#LOW num_sended
+0032 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 183
+0033 120000      R     LCALL   Byte_Set
+                                           ; SOURCE LINE # 184
+0036 900000      E     MOV     DPTR,#extmas+01H
+0039 E0                MOVX    A,@DPTR
+003A B40109            CJNE    A,#01H,?C0027
+                                           ; SOURCE LINE # 185
+                                           ; SOURCE LINE # 186
+003D D295              SETB    DE1
+                                           ; SOURCE LINE # 187
+003F D294              SETB    RE1
+                                           ; SOURCE LINE # 188
+0041 43D202            ORL     SCON1,#02H
+                                           ; SOURCE LINE # 189
+0044 8024              SJMP    ?C0034
+0046         ?C0027:
+0046 900000      E     MOV     DPTR,#extmas+01H
+0049 E0                MOVX    A,@DPTR
+004A 701E              JNZ     ?C0034
+                                           ; SOURCE LINE # 190
+                                           ; SOURCE LINE # 191
+004C D292              SETB    DE0
+                                           ; SOURCE LINE # 192
+004E D291              SETB    RE0
+                                           ; SOURCE LINE # 193
+0050 D299              SETB    TI0
+                                           ; SOURCE LINE # 194
+                                           ; SOURCE LINE # 195
+0052 8016              SJMP    ?C0034
+0054         ?C0026:
+0054 900000      E     MOV     DPTR,#extmas
+0057 E0                MOVX    A,@DPTR
+0058 B40205            CJNE    A,#02H,?C0031
+005B 120000      R     LCALL   Change_baud
+005E 800A              SJMP    ?C0034
+0060         ?C0031:
+                                           ; SOURCE LINE # 196
+0060 900000      E     MOV     DPTR,#extmas
+0063 E0                MOVX    A,@DPTR
+0064 B40303            CJNE    A,#03H,?C0034
+0067 120000      R     LCALL   Change_TIMEOUT
+                                           ; SOURCE LINE # 197
+006A         ?C0034:
+006A D007              POP     AR7
+006C D006              POP     AR6
+006E D005              POP     AR5
+0070 D004              POP     AR4
+0072 D003              POP     AR3
+0074 D002              POP     AR2
+0076 D001              POP     AR1
+0078 D000              POP     AR0
+007A D0D0              POP     PSW
+007C D082              POP     DPL
+007E D083              POP     DPH
+0080 D0F0              POP     B
+0082 D0E0              POP     ACC
+0084 32                RETI    
+             ; FUNCTION INT0_ISR (END)
+
+             ; FUNCTION Timer_Init (BEGIN)
+C51 COMPILER V9.50a   UART                                                                 05/17/2022 15:14:56 PAGE 18  
+
+                                           ; SOURCE LINE # 202
+                                           ; SOURCE LINE # 203
+                                           ; SOURCE LINE # 204
+0000 E4                CLR     A
+0001 F5C8              MOV     TMR2CN,A
+                                           ; SOURCE LINE # 206
+0003 538E0F            ANL     CKCON,#0FH
+                                           ; SOURCE LINE # 207
+0006 F5CB              MOV     TMR2RL+01H,A
+0008 F5CA              MOV     TMR2RL,A
+                                           ; SOURCE LINE # 208
+000A 74FF              MOV     A,#0FFH
+000C F5CD              MOV     TMR2+01H,A
+000E F5CC              MOV     TMR2,A
+                                           ; SOURCE LINE # 209
+0010 D2CA              SETB    TR2
+                                           ; SOURCE LINE # 210
+0012 22                RET     
+             ; FUNCTION Timer_Init (END)
+
+             ; FUNCTION Wait_Set (BEGIN)
+                                           ; SOURCE LINE # 216
+                                           ; SOURCE LINE # 217
+                                           ; SOURCE LINE # 218
+0000 7800        R     MOV     R0,#LOW TIMEOUT_WAIT
+0002 E2                MOVX    A,@R0
+0003 FF                MOV     R7,A
+0004 E4                CLR     A
+0005 FC                MOV     R4,A
+0006 FD                MOV     R5,A
+0007 FE                MOV     R6,A
+0008 7800        R     MOV     R0,#LOW wait_time
+000A 120000      E     LCALL   ?C?LSTPDATA
+                                           ; SOURCE LINE # 219
+000D 7800        R     MOV     R0,#LOW rat_wait
+000F E2                MOVX    A,@R0
+0010 FC                MOV     R4,A
+0011 08                INC     R0
+0012 E2                MOVX    A,@R0
+0013 FD                MOV     R5,A
+0014 08                INC     R0
+0015 E2                MOVX    A,@R0
+0016 FE                MOV     R6,A
+0017 08                INC     R0
+0018 E2                MOVX    A,@R0
+0019 FF                MOV     R7,A
+001A 7800        R     MOV     R0,#LOW wait_time
+001C E2                MOVX    A,@R0
+001D FB                MOV     R3,A
+001E 08                INC     R0
+001F E2                MOVX    A,@R0
+0020 F9                MOV     R1,A
+0021 08                INC     R0
+0022 E2                MOVX    A,@R0
+0023 FA                MOV     R2,A
+0024 08                INC     R0
+0025 E2                MOVX    A,@R0
+0026 CB                XCH     A,R3
+0027 F8                MOV     R0,A
+0028 120000      E     LCALL   ?C?LMUL
+002B C3                CLR     C
+002C 74FF              MOV     A,#0FFH
+C51 COMPILER V9.50a   UART                                                                 05/17/2022 15:14:56 PAGE 19  
+
+002E 9F                SUBB    A,R7
+002F FF                MOV     R7,A
+0030 74FF              MOV     A,#0FFH
+0032 9E                SUBB    A,R6
+0033 F5CD              MOV     TMR2+01H,A
+0035 8FCC              MOV     TMR2,R7
+                                           ; SOURCE LINE # 220
+0037 7800        R     MOV     R0,#LOW rat_wait
+0039 E2                MOVX    A,@R0
+003A FC                MOV     R4,A
+003B 08                INC     R0
+003C E2                MOVX    A,@R0
+003D FD                MOV     R5,A
+003E 08                INC     R0
+003F E2                MOVX    A,@R0
+0040 FE                MOV     R6,A
+0041 08                INC     R0
+0042 E2                MOVX    A,@R0
+0043 FF                MOV     R7,A
+0044 7800        R     MOV     R0,#LOW wait_time
+0046 E2                MOVX    A,@R0
+0047 FB                MOV     R3,A
+0048 08                INC     R0
+0049 E2                MOVX    A,@R0
+004A F9                MOV     R1,A
+004B 08                INC     R0
+004C E2                MOVX    A,@R0
+004D FA                MOV     R2,A
+004E 08                INC     R0
+004F E2                MOVX    A,@R0
+0050 CB                XCH     A,R3
+0051 F8                MOV     R0,A
+0052 120000      E     LCALL   ?C?LMUL
+0055 E4                CLR     A
+0056 7BFF              MOV     R3,#0FFH
+0058 7AFF              MOV     R2,#0FFH
+005A F9                MOV     R1,A
+005B F8                MOV     R0,A
+005C 120000      E     LCALL   ?C?SLDIV
+005F 7800        R     MOV     R0,#LOW wait_ov
+0061 EF                MOV     A,R7
+0062 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 221
+0063 22                RET     
+             ; FUNCTION Wait_Set (END)
+
+             ; FUNCTION L?0049 (BEGIN)
+0000 F0                MOVX    @DPTR,A
+0001 900000      E     MOV     DPTR,#extmas+080H
+0004 E0                MOVX    A,@DPTR
+0005 04                INC     A
+0006 F0                MOVX    @DPTR,A
+             ; FUNCTION Byte_Set (BEGIN)
+                                           ; SOURCE LINE # 223
+                                           ; SOURCE LINE # 224
+                                           ; SOURCE LINE # 225
+0007 7800        R     MOV     R0,#LOW TIMEOUT_BYTE
+0009 E2                MOVX    A,@R0
+000A FF                MOV     R7,A
+000B E4                CLR     A
+000C FC                MOV     R4,A
+000D FD                MOV     R5,A
+C51 COMPILER V9.50a   UART                                                                 05/17/2022 15:14:56 PAGE 20  
+
+000E FE                MOV     R6,A
+000F 7800        R     MOV     R0,#LOW byte_time
+0011 120000      E     LCALL   ?C?LSTPDATA
+                                           ; SOURCE LINE # 226
+0014 7800        R     MOV     R0,#LOW rat_byte
+0016 E2                MOVX    A,@R0
+0017 FC                MOV     R4,A
+0018 08                INC     R0
+0019 E2                MOVX    A,@R0
+001A FD                MOV     R5,A
+001B 08                INC     R0
+001C E2                MOVX    A,@R0
+001D FE                MOV     R6,A
+001E 08                INC     R0
+001F E2                MOVX    A,@R0
+0020 FF                MOV     R7,A
+0021 7800        R     MOV     R0,#LOW byte_time
+0023 E2                MOVX    A,@R0
+0024 FB                MOV     R3,A
+0025 08                INC     R0
+0026 E2                MOVX    A,@R0
+0027 F9                MOV     R1,A
+0028 08                INC     R0
+0029 E2                MOVX    A,@R0
+002A FA                MOV     R2,A
+002B 08                INC     R0
+002C E2                MOVX    A,@R0
+002D CB                XCH     A,R3
+002E F8                MOV     R0,A
+002F 120000      E     LCALL   ?C?LMUL
+0032 C3                CLR     C
+0033 74FF              MOV     A,#0FFH
+0035 9F                SUBB    A,R7
+0036 FF                MOV     R7,A
+0037 74FF              MOV     A,#0FFH
+0039 9E                SUBB    A,R6
+003A F5CD              MOV     TMR2+01H,A
+003C 8FCC              MOV     TMR2,R7
+                                           ; SOURCE LINE # 227
+003E 7800        R     MOV     R0,#LOW rat_byte
+0040 E2                MOVX    A,@R0
+0041 FC                MOV     R4,A
+0042 08                INC     R0
+0043 E2                MOVX    A,@R0
+0044 FD                MOV     R5,A
+0045 08                INC     R0
+0046 E2                MOVX    A,@R0
+0047 FE                MOV     R6,A
+0048 08                INC     R0
+0049 E2                MOVX    A,@R0
+004A FF                MOV     R7,A
+004B 7800        R     MOV     R0,#LOW byte_time
+004D E2                MOVX    A,@R0
+004E FB                MOV     R3,A
+004F 08                INC     R0
+0050 E2                MOVX    A,@R0
+0051 F9                MOV     R1,A
+0052 08                INC     R0
+0053 E2                MOVX    A,@R0
+0054 FA                MOV     R2,A
+0055 08                INC     R0
+0056 E2                MOVX    A,@R0
+C51 COMPILER V9.50a   UART                                                                 05/17/2022 15:14:56 PAGE 21  
+
+0057 CB                XCH     A,R3
+0058 F8                MOV     R0,A
+0059 120000      E     LCALL   ?C?LMUL
+005C E4                CLR     A
+005D 7BFF              MOV     R3,#0FFH
+005F 7AFF              MOV     R2,#0FFH
+0061 F9                MOV     R1,A
+0062 F8                MOV     R0,A
+0063 120000      E     LCALL   ?C?SLDIV
+0066 7800        R     MOV     R0,#LOW byte_ov
+0068 EF                MOV     A,R7
+0069 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 228
+006A 22                RET     
+             ; FUNCTION Byte_Set (END)
+
+             ; FUNCTION Timer2_ISR (BEGIN)
+0000 C0E0              PUSH    ACC
+0002 C0F0              PUSH    B
+0004 C083              PUSH    DPH
+0006 C082              PUSH    DPL
+0008 C0D0              PUSH    PSW
+000A 75D000            MOV     PSW,#00H
+000D C000              PUSH    AR0
+000F C001              PUSH    AR1
+0011 C002              PUSH    AR2
+0013 C003              PUSH    AR3
+0015 C004              PUSH    AR4
+0017 C005              PUSH    AR5
+0019 C006              PUSH    AR6
+001B C007              PUSH    AR7
+                                           ; SOURCE LINE # 234
+                                           ; SOURCE LINE # 236
+001D C2CF              CLR     TF2H
+                                           ; SOURCE LINE # 237
+001F 7800        R     MOV     R0,#LOW inside_interrupt
+0021 E2                MOVX    A,@R0
+0022 6031              JZ      ?C0046
+                                           ; SOURCE LINE # 238
+                                           ; SOURCE LINE # 239
+0024 7800        R     MOV     R0,#LOW wait_ov
+0026 E2                MOVX    A,@R0
+0027 D3                SETB    C
+0028 9400              SUBB    A,#00H
+002A 4002              JC      ?C0039
+002C 8008              SJMP    ?C0048
+002E         ?C0039:
+                                           ; SOURCE LINE # 240
+002E 7800        R     MOV     R0,#LOW byte_ov
+0030 E2                MOVX    A,@R0
+0031 D3                SETB    C
+0032 9400              SUBB    A,#00H
+0034 4005              JC      ?C0041
+0036         ?C0048:
+0036 E2                MOVX    A,@R0
+0037 14                DEC     A
+0038 F2                MOVX    @R0,A
+0039 801A              SJMP    ?C0046
+003B         ?C0041:
+                                           ; SOURCE LINE # 242
+                                           ; SOURCE LINE # 243
+003B 900000      E     MOV     DPTR,#extmas+01H
+C51 COMPILER V9.50a   UART                                                                 05/17/2022 15:14:56 PAGE 22  
+
+003E E0                MOVX    A,@DPTR
+003F B40106            CJNE    A,#01H,?C0043
+                                           ; SOURCE LINE # 244
+                                           ; SOURCE LINE # 245
+0042 D295              SETB    DE1
+                                           ; SOURCE LINE # 246
+0044 D294              SETB    RE1
+                                           ; SOURCE LINE # 247
+0046 800A              SJMP    ?C0044
+0048         ?C0043:
+0048 900000      E     MOV     DPTR,#extmas+01H
+004B E0                MOVX    A,@DPTR
+004C 7004              JNZ     ?C0044
+                                           ; SOURCE LINE # 248
+                                           ; SOURCE LINE # 249
+004E D292              SETB    DE0
+                                           ; SOURCE LINE # 250
+0050 D291              SETB    RE0
+                                           ; SOURCE LINE # 251
+0052         ?C0044:
+                                           ; SOURCE LINE # 252
+0052 120000      R     LCALL   Finish_int
+                                           ; SOURCE LINE # 253
+                                           ; SOURCE LINE # 254
+                                           ; SOURCE LINE # 255
+0055         ?C0046:
+0055 D007              POP     AR7
+0057 D006              POP     AR6
+0059 D005              POP     AR5
+005B D004              POP     AR4
+005D D003              POP     AR3
+005F D002              POP     AR2
+0061 D001              POP     AR1
+0063 D000              POP     AR0
+0065 D0D0              POP     PSW
+0067 D082              POP     DPL
+0069 D083              POP     DPH
+006B D0F0              POP     B
+006D D0E0              POP     ACC
+006F 32                RETI    
+             ; FUNCTION Timer2_ISR (END)
+
+             ; FUNCTION Finish_int (BEGIN)
+                                           ; SOURCE LINE # 257
+                                           ; SOURCE LINE # 258
+                                           ; SOURCE LINE # 259
+0000 E4                CLR     A
+0001 7800        R     MOV     R0,#LOW inside_interrupt
+0003 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 260
+0004 7800        R     MOV     R0,#LOW end_int
+0006 04                INC     A
+0007 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 261
+0008 22                RET     
+             ; FUNCTION Finish_int (END)
+
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =   1319    ----
+   CONSTANT SIZE    =   ----    ----
+C51 COMPILER V9.50a   UART                                                                 05/17/2022 15:14:56 PAGE 23  
+
+   XDATA SIZE       =   ----    ----
+   PDATA SIZE       =     25       4
+   DATA SIZE        =   ----    ----
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =   ----    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

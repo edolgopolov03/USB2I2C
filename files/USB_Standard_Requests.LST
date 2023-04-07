@@ -1,0 +1,1705 @@
+C51 COMPILER V9.50a   USB_STANDARD_REQUESTS                                                04/03/2023 15:54:11 PAGE 1   
+
+
+C51 COMPILER V9.50a, COMPILATION OF MODULE USB_STANDARD_REQUESTS
+OBJECT MODULE PLACED IN USB_Standard_Requests.OBJ
+COMPILER INVOKED BY: C:\Keil\C51\BIN\C51.exe USB_Standard_Requests.c DB OE CD INCDIR(c:\SiLabs\MCU\Inc) COMPACT
+
+line level    source
+
+   1          //-----------------------------------------------------------------------------
+   2          // USB_Standard_Requests.c
+   3          //-----------------------------------------------------------------------------
+   4          // Copyright 2005 Silicon Laboratories, Inc.
+   5          // http://www.silabs.com
+   6          //
+   7          // Program Description:
+   8          //
+   9          // This source file contains the subroutines used to handle incoming 
+  10          // setup packets. These are called by Handle_Setup in USB_ISR.c and used for 
+  11          // USB chapter 9 compliance.
+  12          //
+  13          
+  14          // How To Test:         See Readme.txt
+  15          //
+  16          //
+  17          // FID:                         32X000027
+  18          // Target:                      C8051F32x
+  19          // Tool chain:          Keil C51 7.50 / Keil EVAL C51
+  20          //                                      Silicon Laboratories IDE version 2.6
+  21          // Command Line:         See Readme.txt
+  22          // Project Name:         F32x_USB_Interrupt
+  23          //
+  24          //
+  25          // Release 1.3
+  26          //        -All changes by GP
+  27          //        -22 NOV 2005
+  28          //        -Changed revision number to match project revision
+  29          //              No content changes to this file
+  30          //        -Modified file to fit new formatting guidelines
+  31          //        -Changed file name from USB_STD_REQ.c
+  32          //
+  33          // Release 1.0
+  34          //        -Initial Revision (JS)
+  35          //        -22 NOV 2002
+  36          //
+  37          
+  38          //-----------------------------------------------------------------------------
+  39          // Includes
+  40          //-----------------------------------------------------------------------------
+  41          
+  42          #include "USB_CDC_Type.h"
+  43          #include "USB_Register.h"
+  44          #include "USB_Descriptor.h"
+  45          #include "USB_Standard_Requests.h"
+  46          
+  47          //-----------------------------------------------------------------------------
+  48          // Externs
+  49          //-----------------------------------------------------------------------------
+  50          
+  51          // These are created in USB_DESCRIPTOR.h
+  52          
+  53          extern Tdevice_descriptor code DeviceDesc;
+  54          extern Tconfiguration_desc_set code ConfigDescSet;
+  55          extern BYTE code * code StringDescTable[];
+C51 COMPILER V9.50a   USB_STANDARD_REQUESTS                                                04/03/2023 15:54:11 PAGE 2   
+
+  56          
+  57          extern Tsetup_buffer Setup;                             // Buffer for current device request
+  58          extern bit   setup_handled;                             // flag that indicates setup stage is handled or not
+  59          extern UINT  DataSize;
+  60          extern BYTE* DataPtr;
+  61          
+  62          extern BYTE Ep_Status0;                                 // Contains status bytes for EP 0-2
+  63          extern bit Ep_Status1;
+  64          extern bit Ep_StatusIN2;
+  65          extern bit Ep_StatusOUT2;
+  66          
+  67          extern BYTE USB_State;                                  // Determines current usb device state
+  68          
+  69          extern bit cs_Line_State_Update;                // update line state
+  70          
+  71          //-----------------------------------------------------------------------------
+  72          // Global Variables
+  73          //-----------------------------------------------------------------------------
+  74          
+  75          // These are response packets used for communication with host
+  76          code BYTE ONES_PACKET[2] = {0x01, 0x00};                
+  77          code BYTE ZERO_PACKET[2] = {0x00, 0x00};                
+  78          
+  79          //-----------------------------------------------------------------------------
+  80          // Function prototypes
+  81          //-----------------------------------------------------------------------------
+  82          
+  83          void Get_Status(void);
+  84          void Clear_Feature(void);
+  85          void Set_Feature(void);
+  86          void Set_Address(void);
+  87          void Get_Descriptor(void);
+  88          void Get_Configuration(void);
+  89          void Set_Configuration(void);
+  90          void Get_Interface(void);
+  91          void Set_Interface(void);
+  92          
+  93          //-----------------------------------------------------------------------------
+  94          // SDCC suport
+  95          //-----------------------------------------------------------------------------
+  96          #if defined SDCC
+              #pragma nooverlay
+              #endif // SDCC
+  99          
+ 100          //-----------------------------------------------------------------------------
+ 101          // Standard device request handler
+ 102          //-----------------------------------------------------------------------------
+ 103          
+ 104          void Standard_Device_Request( void )
+ 105          {
+ 106   1              switch(Setup.bRequest)
+ 107   1              {
+ 108   2                      case GET_STATUS:                Get_Status();                   break;
+ 109   2                      case CLEAR_FEATURE:             Clear_Feature();                break;
+ 110   2                      case SET_FEATURE:               Set_Feature();                  break;
+ 111   2                      case SET_ADDRESS:               Set_Address();                  break;
+ 112   2                      case GET_DESCRIPTOR:    Get_Descriptor();               break;
+ 113   2                      case GET_CONFIGURATION: Get_Configuration();    break;
+ 114   2                      case SET_CONFIGURATION: Set_Configuration();    break;
+ 115   2                      case GET_INTERFACE:             Get_Interface();                break;
+ 116   2                      case SET_INTERFACE:             Set_Interface();                break;
+ 117   2                      default:                                                                                break;
+C51 COMPILER V9.50a   USB_STANDARD_REQUESTS                                                04/03/2023 15:54:11 PAGE 3   
+
+ 118   2              }
+ 119   1      }
+ 120          
+ 121          //-----------------------------------------------------------------------------
+ 122          // Support Subroutines
+ 123          //-----------------------------------------------------------------------------
+ 124          
+ 125          //-----------------------------------------------------------------------------
+ 126          // Get_Status
+ 127          //-----------------------------------------------------------------------------
+ 128          //
+ 129          // Return Value : None
+ 130          // Parameters   : None
+ 131          //
+ 132          // This routine returns a two byte status packet to the host
+ 133          //
+ 134          //-----------------------------------------------------------------------------
+ 135          
+ 136          void Get_Status(void)
+ 137          {
+ 138   1              bit aStatus;
+ 139   1      
+ 140   1              // Valid when wValue equals to zero, and wLength (data length) equals to 2 
+ 141   1              if ( (Setup.wValue.i == 0) && (Setup.wLength.i == 2) )
+ 142   1              {
+ 143   2                      // Determine if recipient was device, interface, or EP
+ 144   2                      switch( Setup.bmRequestType )                                   
+ 145   2                      {
+ 146   3                              case IN_DEVICE:                                 // If recipient was device
+ 147   3                                      if ( Setup.wIndex.i == 0 ) // Valid when wIndex equals to zero
+ 148   3                                      {
+ 149   4                                              // send 0x00, indicating bus power and no remote wake-up supported
+ 150   4                                              DataPtr = (BYTE*)&ZERO_PACKET;
+ 151   4                                              setup_handled = TRUE;
+ 152   4                                      }
+ 153   3                                      break;
+ 154   3      
+ 155   3                              case IN_INTERFACE:                              // See if recipient was interface                                               
+ 156   3                                      // Only valid if device is configured and existing interface index
+ 157   3                                      if ( (USB_State == DEV_CONFIGURED) && (Setup.wIndex.i < DSC_NUM_INTERFACE) )                                                                                            
+ 158   3                                      {
+ 159   4                                              // Status packet always returns 0x00
+ 160   4                                              DataPtr = (BYTE*)&ZERO_PACKET;          
+ 161   4                                              setup_handled = TRUE;
+ 162   4                                      }
+ 163   3                                      break;
+ 164   3      
+ 165   3                              case IN_ENDPOINT:                               // See if recipient was an endpoint                                                     
+ 166   3                                      // Make sure device is configured and index msb = 0x00
+ 167   3                                      if ((USB_State == DEV_CONFIGURED) && (Setup.wIndex.c[MSB] == 0) )
+ 168   3                                      {
+ 169   4                                              aStatus = EP_IDLE;
+ 170   4                                              switch ( Setup.wIndex.c[LSB] )
+ 171   4                                              {
+ 172   5                                                      case IN_EP1:    aStatus = Ep_Status1;           setup_handled = TRUE;   break;          
+ 173   5                                                      case OUT_EP2:   aStatus = Ep_StatusOUT2;        setup_handled = TRUE;   break;
+ 174   5                                                      case IN_EP2:    aStatus = Ep_StatusIN2;         setup_handled = TRUE;   break;
+ 175   5                                                      default:                                                                                                                        break;
+ 176   5                                              }
+ 177   4                                              if (aStatus == EP_HALT)
+ 178   4                                              {
+ 179   5                                                      // If endpoint is halted, return 0x01,0x00
+C51 COMPILER V9.50a   USB_STANDARD_REQUESTS                                                04/03/2023 15:54:11 PAGE 4   
+
+ 180   5                                                      DataPtr = (BYTE*)&ONES_PACKET;
+ 181   5                                              } else {
+ 182   5                                                      // Otherwise return 0x00,0x00 to indicate endpoint active
+ 183   5                                                      DataPtr = (BYTE*)&ZERO_PACKET;
+ 184   5                                              }
+ 185   4                                      }
+ 186   3                                      break;
+ 187   3      
+ 188   3                              default:
+ 189   3                                      break;
+ 190   3                      }
+ 191   2              }
+ 192   1      
+ 193   1              if ( setup_handled )
+ 194   1              {
+ 195   2                      // Set serviced Setup Packet, Endpoint 0 intransmit mode, 
+ 196   2                      Ep_Status0 = EP_TX;                                             
+ 197   2                      DataSize = 2;                                           
+ 198   2              }
+ 199   1      }
+ 200          
+ 201          //-----------------------------------------------------------------------------
+ 202          // Clear_Feature
+ 203          //-----------------------------------------------------------------------------
+ 204          //
+ 205          // Return Value : None
+ 206          // Parameters   : None
+ 207          //
+ 208          // This routine can clear Halt Endpoint features on endpoint 1 and 2.
+ 209          //
+ 210          //-----------------------------------------------------------------------------
+ 211          
+ 212          void Clear_Feature()
+ 213          {
+ 214   1              if (   (USB_State == DEV_CONFIGURED)                    // Make sure device is configured
+ 215   1                      && (Setup.wLength.i == 0) )                                     // and data length set to zero.
+ 216   1              {
+ 217   2                      switch( Setup.bmRequestType )                                   
+ 218   2                      {
+ 219   3                              case OUT_DEVICE:                                                // for device, only remote wakeup is valid
+ 220   3                                      if (   (Setup.wValue.i == DEVICE_REMOTE_WAKEUP)
+ 221   3                                              && (Setup.wIndex.i == 0) )
+ 222   3                                      {
+ 223   4                                              // clear remote wakeup condition here
+ 224   4                                              setup_handled = TRUE;
+ 225   4                                      }
+ 226   3                                      break;
+ 227   3      
+ 228   3                              case OUT_ENDPOINT:                                              // for endpoint, only endpoint halt is valid
+ 229   3                                      if (   (Setup.wValue.i == ENDPOINT_HALT)
+ 230   3                                              && (Setup.wIndex.c[MSB] == 0) )
+ 231   3                                      {
+ 232   4                                              switch ( Setup.wIndex.c[LSB] )
+ 233   4                                              {
+ 234   5                                                      case IN_EP1:
+ 235   5                                                              POLL_WRITE_BYTE (INDEX, 1);                     // Clear feature endpoint 1 halt
+ 236   5                                                              POLL_WRITE_BYTE (EINCSR1, rbInCLRDT);   // clear data toggle, SDSTL, STSTL
+ 237   5                                                              Ep_Status1 = EP_IDLE;                           // Set endpoint 1 status back to idle
+ 238   5                                                              setup_handled = TRUE;
+ 239   5                                                              break;
+ 240   5      
+ 241   5                                                      case OUT_EP2:
+C51 COMPILER V9.50a   USB_STANDARD_REQUESTS                                                04/03/2023 15:54:11 PAGE 5   
+
+ 242   5                                                              POLL_WRITE_BYTE (INDEX, 2);                     // Clear feature endpoint 2 halt
+ 243   5                                                              POLL_WRITE_BYTE (EOUTCSR1, rbOutCLRDT); // clear data toggle, SDSTL, STSTL
+ 244   5                                                              Ep_StatusOUT2 = EP_IDLE;                        // Set endpoint 2 status back to idle
+ 245   5                                                              setup_handled = TRUE;
+ 246   5                                                              break;
+ 247   5      
+ 248   5                                                      case IN_EP2:
+ 249   5                                                              POLL_WRITE_BYTE (INDEX, 2);                     // Clear feature endpoint 2 halt
+ 250   5                                                              POLL_WRITE_BYTE (EINCSR1, rbInCLRDT);   // clear data toggle, SDSTL, STSTL
+ 251   5                                                              Ep_StatusIN2 = EP_IDLE;                         // Set endpoint 2 status back to idle
+ 252   5                                                              setup_handled = TRUE;
+ 253   5                                                              break;
+ 254   5      
+ 255   5                                                      default:
+ 256   5                                                              break;
+ 257   5                                              }
+ 258   4                                      }
+ 259   3                                      break;
+ 260   3      
+ 261   3                              default:
+ 262   3                                      break;
+ 263   3                      }
+ 264   2              }
+ 265   1      }
+ 266          
+ 267          //-----------------------------------------------------------------------------
+ 268          // Set_Feature
+ 269          //-----------------------------------------------------------------------------
+ 270          //
+ 271          // Return Value : None
+ 272          // Parameters   : None
+ 273          //
+ 274          // This routine will set the EP Halt feature for endpoints 1 and 2
+ 275          //
+ 276          //-----------------------------------------------------------------------------
+ 277          
+ 278          void Set_Feature(void)
+ 279          {
+ 280   1              if (   (USB_State == DEV_CONFIGURED)                    // Make sure device is configured
+ 281   1                      && (Setup.wLength.i == 0) )                                     // and data length set to zero.
+ 282   1              {
+ 283   2                      switch( Setup.bmRequestType )                                   
+ 284   2                      {
+ 285   3                              case OUT_DEVICE:                                                // for device, only remote wakeup is valid
+ 286   3                                      if (   (Setup.wValue.i == DEVICE_REMOTE_WAKEUP)
+ 287   3                                              && (Setup.wIndex.i == 0) )
+ 288   3                                      {
+ 289   4                                              // clear remote wakeup condition here
+ 290   4                                              setup_handled = TRUE;
+ 291   4                                      }
+ 292   3                                      break;
+ 293   3      
+ 294   3                              case OUT_ENDPOINT:                                              // for endpoint, only endpoint halt is valid
+ 295   3                                      if (   (Setup.wValue.i == ENDPOINT_HALT)
+ 296   3                                              && (Setup.wIndex.c[MSB] == 0) )
+ 297   3                                      {
+ 298   4                                              switch ( Setup.wIndex.c[LSB] )
+ 299   4                                              {
+ 300   5                                                      case IN_EP1:
+ 301   5                                                              Ep_Status1 = EP_HALT;                           // Set endpoint 1 status to halt
+ 302   5                                                              setup_handled = TRUE;
+ 303   5                                                              break;
+C51 COMPILER V9.50a   USB_STANDARD_REQUESTS                                                04/03/2023 15:54:11 PAGE 6   
+
+ 304   5      
+ 305   5                                                      case OUT_EP2:
+ 306   5                                                              Ep_StatusOUT2 = EP_HALT;                        // Set endpoint 2 status to halt
+ 307   5                                                              setup_handled = TRUE;
+ 308   5                                                              break;
+ 309   5      
+ 310   5                                                      case IN_EP2:
+ 311   5                                                              Ep_StatusIN2 = EP_HALT;                         // Set endpoint 2 status to halt
+ 312   5                                                              setup_handled = TRUE;
+ 313   5                                                              break;
+ 314   5      
+ 315   5                                                      default:
+ 316   5                                                              break;
+ 317   5                                              }
+ 318   4                                      }
+ 319   3                                      break;
+ 320   3      
+ 321   3                              default:
+ 322   3                                      break;
+ 323   3                      }
+ 324   2              }
+ 325   1      }
+ 326          
+ 327          //-----------------------------------------------------------------------------
+ 328          // Set_Address
+ 329          //-----------------------------------------------------------------------------
+ 330          //
+ 331          // Return Value : None
+ 332          // Parameters   : None
+ 333          //
+ 334          // Set new function address
+ 335          //
+ 336          //-----------------------------------------------------------------------------
+ 337          
+ 338          void Set_Address(void)
+ 339          {
+ 340   1              if (   (Setup.bmRequestType == OUT_DEVICE)              // Request must be directed to device
+ 341   1                      && (Setup.wIndex.i == 0)                                        // with index and length set to zero.
+ 342   1                      && (Setup.wLength.i == 0)                                       // wValue holds the address, up to 0x7F
+ 343   1                      && (Setup.wValue.c[MSB] == 0) && ((Setup.wValue.c[LSB] & 0x80) == 0) )
+ 344   1              {
+ 345   2                      if (Setup.wValue.c[LSB] != 0)
+ 346   2                      {
+ 347   3                              POLL_WRITE_BYTE(FADDR, Setup.wValue.c[LSB]);    // write new address to FADDR
+ 348   3                                                                                                                              // SIE applies this address after status stage
+ 349   3                              USB_State = DEV_ADDRESS;                // Indicate that device state is now address
+ 350   3                      }
+ 351   2                      else
+ 352   2                      {
+ 353   3                              USB_State = DEV_DEFAULT;                // If new address was 0x00, return device to default state
+ 354   3                      }
+ 355   2                      setup_handled = TRUE;
+ 356   2              }
+ 357   1      }
+ 358          
+ 359          //-----------------------------------------------------------------------------
+ 360          // Get_Descriptor
+ 361          //-----------------------------------------------------------------------------
+ 362          //
+ 363          // Return Value : None
+ 364          // Parameters   : None
+ 365          //
+C51 COMPILER V9.50a   USB_STANDARD_REQUESTS                                                04/03/2023 15:54:11 PAGE 7   
+
+ 366          // This routine sets the data pointer and size to correct 
+ 367          // descriptor and sets the endpoint status to transmit
+ 368          //
+ 369          //-----------------------------------------------------------------------------
+ 370          
+ 371          void Get_Descriptor(void)
+ 372          {
+ 373   1              if ( (Setup.bmRequestType == IN_DEVICE) ) // Request must be directed to device
+ 374   1              {
+ 375   2                      switch(Setup.wValue.c[MSB])                             // Determine which type of descriptor
+ 376   2                      {                                                                               // was requested, and set data ptr and
+ 377   3                              case DST_DEVICE:                                        // size accordingly
+ 378   3                                      if ( (Setup.wValue.c[LSB] == 0) && (Setup.wIndex.i == 0) )
+ 379   3                                      {
+ 380   4                                              DataPtr = (BYTE*)&DeviceDesc;
+ 381   4                                              DataSize = sizeof( Tdevice_descriptor );
+ 382   4                                              setup_handled = TRUE;
+ 383   4                                      }
+ 384   3                                      break;
+ 385   3      
+ 386   3                              case DST_CONFIG:                                        // wValue.LSB holds config index
+ 387   3                                      if ( (Setup.wValue.c[LSB] == 0) && (Setup.wIndex.i == 0) )
+ 388   3                                      {
+ 389   4                                              DataPtr = (BYTE*)&ConfigDescSet;
+ 390   4                                              DataSize = sizeof( Tconfiguration_desc_set );
+ 391   4                                              setup_handled = TRUE;
+ 392   4                                      }
+ 393   3                                      break;
+ 394   3      
+ 395   3                              case DST_STRING:                                        // wValue.LSB holds string index
+ 396   3                                                                                                      // wIndex holds language ID
+ 397   3                                      if ( Setup.wValue.c[LSB] < DSC_NUM_STRING )
+ 398   3                                      {
+ 399   4                                              DataPtr = StringDescTable[Setup.wValue.c[LSB]];
+ 400   4                                              DataSize = *DataPtr;
+ 401   4                                              setup_handled = TRUE;
+ 402   4                                      }
+ 403   3                                      break;
+ 404   3      
+ 405   3                              default:
+ 406   3                                      break;
+ 407   3                      }
+ 408   2              }
+ 409   1      
+ 410   1              if ( setup_handled )
+ 411   1              {
+ 412   2                      Ep_Status0 = EP_TX;                                                     // Put endpoint in transmit mode
+ 413   2                      if ( DataSize > Setup.wLength.i )
+ 414   2                              DataSize = Setup.wLength.i;                             // Send only requested amount of data
+ 415   2              }
+ 416   1      }
+ 417          
+ 418          //-----------------------------------------------------------------------------
+ 419          // Get_Configuration
+ 420          //-----------------------------------------------------------------------------
+ 421          //
+ 422          // Return Value : None
+ 423          // Parameters   : None
+ 424          //
+ 425          // This routine returns current configuration value
+ 426          //
+ 427          //-----------------------------------------------------------------------------
+C51 COMPILER V9.50a   USB_STANDARD_REQUESTS                                                04/03/2023 15:54:11 PAGE 8   
+
+ 428          
+ 429          void Get_Configuration(void)
+ 430          {
+ 431   1              if (   (Setup.bmRequestType == IN_DEVICE) // This request must be directed to the device
+ 432   1                      && (Setup.wValue.i == 0)                                // with value word set to zero
+ 433   1                      && (Setup.wIndex.i == 0)                                // and index set to zero
+ 434   1                      && (Setup.wLength.i == 1) )                             // and setup length set to one
+ 435   1              {
+ 436   2                      if (USB_State == DEV_CONFIGURED)                // If the device is configured, then return value 0x01
+ 437   2                      {                                                                               // since this software only supports one configuration
+ 438   3                              DataPtr = (BYTE*)&ONES_PACKET;
+ 439   3                              setup_handled = TRUE;
+ 440   3                      }
+ 441   2                      if (USB_State == DEV_ADDRESS)                   // If the device is in address state, it is not
+ 442   2                      {                                                                               // configured, so return 0x00
+ 443   3                              DataPtr = (BYTE*)&ZERO_PACKET;
+ 444   3                              setup_handled = TRUE;
+ 445   3                      }
+ 446   2              }
+ 447   1              
+ 448   1              if ( setup_handled )
+ 449   1              {
+ 450   2                      // Set serviced Setup Packet, Endpoint 0 intransmit mode
+ 451   2                      Ep_Status0 = EP_TX;                                             
+ 452   2                      DataSize = 1;                                           
+ 453   2              }
+ 454   1      }
+ 455          
+ 456          //-----------------------------------------------------------------------------
+ 457          // Set_Configuration
+ 458          //-----------------------------------------------------------------------------
+ 459          //
+ 460          // Return Value : None
+ 461          // Parameters   : None
+ 462          //
+ 463          // This routine allows host to change current device configuration value
+ 464          //
+ 465          //-----------------------------------------------------------------------------
+ 466          
+ 467          void Set_Configuration(void)
+ 468          {
+ 469   1              if (   (Setup.bmRequestType == OUT_DEVICE)      // This request must be directed to the device
+ 470   1                      && (Setup.wIndex.i == 0)                                // and index set to zero
+ 471   1                      && (Setup.wLength.i == 0) )                             // and data length set to one
+ 472   1              {
+ 473   2                      if (Setup.wValue.c[LSB] > 0)                    // Any positive configuration request
+ 474   2                      {                                                                               // results in configuration being set to 1
+ 475   3                              USB_State = DEV_CONFIGURED;
+ 476   3      
+ 477   3                              // The endpoint regsiters, E0CSR, EINCSRL/H and EOUTCSRL/H, are cleared by bus reset.
+ 478   3                              // Also data toggles for the EPs are also cleared by bus reset.
+ 479   3                              // Set_Configuration is a good place to set these registers,
+ 480   3                              // when any alternate interface is present.
+ 481   3                              // When the device has any alternate interface, initialize these registers in
+ 482   3                              // Set_Interface according to selected interface
+ 483   3      
+ 484   3                              POLL_WRITE_BYTE(INDEX, 1);                              // Select EP1
+ 485   3                              POLL_WRITE_BYTE(EINCSR2, rbInDIRSEL);   // Set DIRSEL to indicate endpoint 1 is IN
+ 486   3                              POLL_WRITE_BYTE(EINCSR1, rbInCLRDT);    // clear data toggle
+ 487   3                              Ep_Status1 = EP_IDLE;                                   // Set endpoint status to idle (enabled)
+ 488   3      
+ 489   3                              cs_Line_State_Update = TRUE;                    // Send current line status
+C51 COMPILER V9.50a   USB_STANDARD_REQUESTS                                                04/03/2023 15:54:11 PAGE 9   
+
+ 490   3                              Handle_In1();
+ 491   3      
+ 492   3                              POLL_WRITE_BYTE(INDEX, 2);                              // Select EP2
+ 493   3                              POLL_WRITE_BYTE(EINCSR2, rbInDBIEN | rbInSPLIT);        // split, double buffer
+ 494   3                              POLL_WRITE_BYTE(EINCSR1, rbInCLRDT);    // clear data toggle, SDSTL, STSTL
+ 495   3                              POLL_WRITE_BYTE(EOUTCSR2, rbOutDBOEN);  // double buffer
+ 496   3                              POLL_WRITE_BYTE(EOUTCSR1, rbOutCLRDT);  // clear data toggle
+ 497   3                              Ep_StatusOUT2 = EP_IDLE;
+ 498   3                              Ep_StatusIN2 = EP_IDLE;
+ 499   3                      }
+ 500   2                      else
+ 501   2                      {
+ 502   3                              USB_State = DEV_ADDRESS;                                // Unconfigures device by setting state to
+ 503   3                              Ep_Status1 = EP_HALT;                                   // address, and changing endpoint 1 and 2
+ 504   3                              Ep_StatusOUT2 = EP_HALT;                                        // status to halt
+ 505   3                              Ep_StatusIN2  = EP_HALT;
+ 506   3                      }
+ 507   2      
+ 508   2                      setup_handled = TRUE;
+ 509   2              }
+ 510   1      }
+ 511          
+ 512          //-----------------------------------------------------------------------------
+ 513          // Get_Interface
+ 514          //-----------------------------------------------------------------------------
+ 515          //
+ 516          // Return Value : None
+ 517          // Parameters   : None
+ 518          //
+ 519          // This routine returns 0x00, since no alternate interface is supported by 
+ 520          // this firmware
+ 521          //
+ 522          //-----------------------------------------------------------------------------
+ 523          
+ 524          void Get_Interface(void)
+ 525          {
+ 526   1              if (   (USB_State == DEV_CONFIGURED)                    // If device is configured
+ 527   1                      && (Setup.bmRequestType == IN_INTERFACE)        // and recipient is an interface
+ 528   1                      && (Setup.wValue.i == 0)                                        // and wValue equals to 0
+ 529   1                      && (Setup.wIndex.i < DSC_NUM_INTERFACE)         // and valid interface index
+ 530   1                      && (Setup.wLength.i == 1) )                                     // and data length equals to one
+ 531   1              {
+ 532   2                      DataPtr = (BYTE*)&ZERO_PACKET;                  // return 0x00 to host
+ 533   2                      Ep_Status0 = EP_TX;
+ 534   2                      DataSize = 1;
+ 535   2                      setup_handled = TRUE;
+ 536   2              }
+ 537   1      }
+ 538          
+ 539          //-----------------------------------------------------------------------------
+ 540          // Set_Interface
+ 541          //-----------------------------------------------------------------------------
+ 542          //
+ 543          // Return Value : None
+ 544          // Parameters   : None
+ 545          //
+ 546          // This routine allows host to change the interface to alternate one
+ 547          // The request is only valid when wValue (alternate IF index) is 0,
+ 548          // because this implementation has no alternate IF
+ 549          //
+ 550          //-----------------------------------------------------------------------------
+ 551          
+C51 COMPILER V9.50a   USB_STANDARD_REQUESTS                                                04/03/2023 15:54:11 PAGE 10  
+
+ 552          void Set_Interface(void)
+ 553          {
+ 554   1              // Make sure request is directed at interface and all other packet values 
+ 555   1              // are set to zero
+ 556   1              if (   (Setup.bmRequestType == OUT_INTERFACE)
+ 557   1                      && (Setup.wValue.i == 0 )               // wValue holds alternate interface index
+ 558   1                      && (Setup.wIndex.i < DSC_NUM_INTERFACE)
+ 559   1                      && (Setup.wLength.i == 0) )
+ 560   1              {
+ 561   2                      // Indicate setup packet has been serviced
+ 562   2                      setup_handled = TRUE;
+ 563   2              }
+ 564   1      }
+ 565          
+ 566          //-----------------------------------------------------------------------------
+ 567          // End Of File
+ 568          //-----------------------------------------------------------------------------
+C51 COMPILER V9.50a   USB_STANDARD_REQUESTS                                                04/03/2023 15:54:11 PAGE 11  
+
+ASSEMBLY LISTING OF GENERATED OBJECT CODE
+
+
+             ; FUNCTION Standard_Device_Request (BEGIN)
+                                           ; SOURCE LINE # 104
+                                           ; SOURCE LINE # 105
+                                           ; SOURCE LINE # 106
+0000 7800        E     MOV     R0,#LOW Setup+01H
+0002 E2                MOVX    A,@R0
+0003 B40C00            CJNE    A,#0CH,?C0116
+0006         ?C0116:
+0006 5046              JNC     ?C0012
+0008 900000      R     MOV     DPTR,#?C0117
+000B F8                MOV     R0,A
+000C 28                ADD     A,R0
+000D 28                ADD     A,R0
+000E 73                JMP     @A+DPTR
+000F         ?C0117:
+000F 020000      R     LJMP    ?C0002
+0012 020000      R     LJMP    ?C0003
+0015 020000      R     LJMP    ?C0012
+0018 020000      R     LJMP    ?C0004
+001B 020000      R     LJMP    ?C0012
+001E 020000      R     LJMP    ?C0005
+0021 020000      R     LJMP    ?C0006
+0024 020000      R     LJMP    ?C0012
+0027 020000      R     LJMP    ?C0007
+002A 020000      R     LJMP    ?C0008
+002D 020000      R     LJMP    ?C0009
+0030 020000      R     LJMP    ?C0010
+                                           ; SOURCE LINE # 107
+                                           ; SOURCE LINE # 108
+0033         ?C0002:
+0033 020000      R     LJMP    Get_Status
+                                           ; SOURCE LINE # 109
+0036         ?C0003:
+0036 020000      R     LJMP    Clear_Feature
+                                           ; SOURCE LINE # 110
+0039         ?C0004:
+0039 020000      R     LJMP    Set_Feature
+                                           ; SOURCE LINE # 111
+003C         ?C0005:
+003C 020000      R     LJMP    Set_Address
+                                           ; SOURCE LINE # 112
+003F         ?C0006:
+003F 020000      R     LJMP    Get_Descriptor
+                                           ; SOURCE LINE # 113
+0042         ?C0007:
+0042 020000      R     LJMP    Get_Configuration
+                                           ; SOURCE LINE # 114
+0045         ?C0008:
+0045 020000      R     LJMP    Set_Configuration
+                                           ; SOURCE LINE # 115
+0048         ?C0009:
+0048 020000      R     LJMP    Get_Interface
+                                           ; SOURCE LINE # 116
+004B         ?C0010:
+004B 120000      R     LCALL   Set_Interface
+                                           ; SOURCE LINE # 117
+                                           ; SOURCE LINE # 118
+                                           ; SOURCE LINE # 119
+004E         ?C0012:
+C51 COMPILER V9.50a   USB_STANDARD_REQUESTS                                                04/03/2023 15:54:11 PAGE 12  
+
+004E 22                RET     
+             ; FUNCTION Standard_Device_Request (END)
+
+             ; FUNCTION Get_Status (BEGIN)
+                                           ; SOURCE LINE # 136
+                                           ; SOURCE LINE # 137
+                                           ; SOURCE LINE # 141
+0000 7800        E     MOV     R0,#LOW Setup+03H
+0002 E2                MOVX    A,@R0
+0003 7002              JNZ     ?C0118
+0005 18                DEC     R0
+0006 E2                MOVX    A,@R0
+0007         ?C0118:
+0007 6003              JZ      $ + 5H
+0009 020000      R     LJMP    ?C0013
+000C 7800        E     MOV     R0,#LOW Setup+07H
+000E E2                MOVX    A,@R0
+000F 6402              XRL     A,#02H
+0011 7002              JNZ     ?C0119
+0013 18                DEC     R0
+0014 E2                MOVX    A,@R0
+0015         ?C0119:
+0015 6003              JZ      $ + 5H
+0017 020000      R     LJMP    ?C0013
+                                           ; SOURCE LINE # 142
+                                           ; SOURCE LINE # 144
+001A 7800        E     MOV     R0,#LOW Setup
+001C E2                MOVX    A,@R0
+001D 247F              ADD     A,#07FH
+001F 6012              JZ      ?C0017
+0021 14                DEC     A
+0022 6033              JZ      ?C0019
+0024 2402              ADD     A,#02H
+0026 7073              JNZ     ?C0013
+                                           ; SOURCE LINE # 145
+                                           ; SOURCE LINE # 146
+0028         ?C0015:
+                                           ; SOURCE LINE # 147
+0028 7800        E     MOV     R0,#LOW Setup+05H
+002A E2                MOVX    A,@R0
+002B 7002              JNZ     ?C0120
+002D 18                DEC     R0
+002E E2                MOVX    A,@R0
+002F         ?C0120:
+002F 706A              JNZ     ?C0013
+                                           ; SOURCE LINE # 148
+                                           ; SOURCE LINE # 150
+                                           ; SOURCE LINE # 151
+                                           ; SOURCE LINE # 152
+                                           ; SOURCE LINE # 153
+0031 8013              SJMP    ?C0142
+                                           ; SOURCE LINE # 155
+0033         ?C0017:
+                                           ; SOURCE LINE # 157
+0033 7800        E     MOV     R0,#LOW USB_State
+0035 E2                MOVX    A,@R0
+0036 6404              XRL     A,#04H
+0038 7061              JNZ     ?C0013
+003A C3                CLR     C
+003B 7800        E     MOV     R0,#LOW Setup+05H
+003D E2                MOVX    A,@R0
+003E 9402              SUBB    A,#02H
+C51 COMPILER V9.50a   USB_STANDARD_REQUESTS                                                04/03/2023 15:54:11 PAGE 13  
+
+0040 18                DEC     R0
+0041 E2                MOVX    A,@R0
+0042 9400              SUBB    A,#00H
+0044 5055              JNC     ?C0013
+                                           ; SOURCE LINE # 158
+                                           ; SOURCE LINE # 160
+0046         ?C0142:
+0046 7800        E     MOV     R0,#LOW DataPtr
+0048 74FF              MOV     A,#0FFH
+004A F2                MOVX    @R0,A
+004B 08                INC     R0
+004C 7400        R     MOV     A,#HIGH ZERO_PACKET
+004E F2                MOVX    @R0,A
+004F 08                INC     R0
+0050 7400        R     MOV     A,#LOW ZERO_PACKET
+0052 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 161
+0053 D200        E     SETB    setup_handled
+                                           ; SOURCE LINE # 162
+                                           ; SOURCE LINE # 163
+0055 8044              SJMP    ?C0013
+                                           ; SOURCE LINE # 165
+0057         ?C0019:
+                                           ; SOURCE LINE # 167
+0057 7800        E     MOV     R0,#LOW USB_State
+0059 E2                MOVX    A,@R0
+005A 6404              XRL     A,#04H
+005C 703D              JNZ     ?C0013
+005E 7800        E     MOV     R0,#LOW Setup+04H
+0060 E2                MOVX    A,@R0
+0061 7038              JNZ     ?C0013
+                                           ; SOURCE LINE # 168
+                                           ; SOURCE LINE # 169
+0063 C200        R     CLR     aStatus
+                                           ; SOURCE LINE # 170
+0065 08                INC     R0
+0066 E2                MOVX    A,@R0
+0067 24FE              ADD     A,#0FEH
+0069 600B              JZ      ?C0023
+006B 2480              ADD     A,#080H
+006D 600B              JZ      ?C0024
+006F 04                INC     A
+0070 700E              JNZ     ?C0021
+                                           ; SOURCE LINE # 171
+                                           ; SOURCE LINE # 172
+0072         ?C0022:
+0072 A200        E     MOV     C,Ep_Status1
+0074 8006              SJMP    ?C0144
+                                           ; SOURCE LINE # 173
+0076         ?C0023:
+0076 A200        E     MOV     C,Ep_StatusOUT2
+0078         ?C0143:
+0078 8002              SJMP    ?C0144
+                                           ; SOURCE LINE # 174
+007A         ?C0024:
+007A A200        E     MOV     C,Ep_StatusIN2
+007C         ?C0144:
+007C 9200        R     MOV     aStatus,C
+007E D200        E     SETB    setup_handled
+                                           ; SOURCE LINE # 175
+                                           ; SOURCE LINE # 176
+0080         ?C0021:
+C51 COMPILER V9.50a   USB_STANDARD_REQUESTS                                                04/03/2023 15:54:11 PAGE 14  
+
+                                           ; SOURCE LINE # 177
+0080 7800        E     MOV     R0,#LOW DataPtr
+0082 74FF              MOV     A,#0FFH
+0084 30000B      R     JNB     aStatus,?C0026
+                                           ; SOURCE LINE # 178
+                                           ; SOURCE LINE # 180
+0087 F2                MOVX    @R0,A
+0088 08                INC     R0
+0089 7400        R     MOV     A,#HIGH ONES_PACKET
+008B F2                MOVX    @R0,A
+008C 08                INC     R0
+008D 7400        R     MOV     A,#LOW ONES_PACKET
+008F F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 181
+0090 8009              SJMP    ?C0013
+0092         ?C0026:
+                                           ; SOURCE LINE # 183
+0092 F2                MOVX    @R0,A
+0093 08                INC     R0
+0094 7400        R     MOV     A,#HIGH ZERO_PACKET
+0096 F2                MOVX    @R0,A
+0097 08                INC     R0
+0098 7400        R     MOV     A,#LOW ZERO_PACKET
+009A F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 184
+                                           ; SOURCE LINE # 185
+                                           ; SOURCE LINE # 186
+                                           ; SOURCE LINE # 188
+                                           ; SOURCE LINE # 189
+                                           ; SOURCE LINE # 190
+                                           ; SOURCE LINE # 191
+009B         ?C0013:
+                                           ; SOURCE LINE # 193
+009B 30000D      E     JNB     setup_handled,?C0030
+                                           ; SOURCE LINE # 194
+                                           ; SOURCE LINE # 196
+009E 7800        E     MOV     R0,#LOW Ep_Status0
+00A0 7402              MOV     A,#02H
+00A2 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 197
+00A3 7800        E     MOV     R0,#LOW DataSize
+00A5 E4                CLR     A
+00A6 F2                MOVX    @R0,A
+00A7 08                INC     R0
+00A8 7402              MOV     A,#02H
+00AA F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 198
+                                           ; SOURCE LINE # 199
+00AB         ?C0030:
+00AB 22                RET     
+             ; FUNCTION Get_Status (END)
+
+             ; FUNCTION Clear_Feature (BEGIN)
+                                           ; SOURCE LINE # 212
+                                           ; SOURCE LINE # 213
+                                           ; SOURCE LINE # 214
+0000 7800        E     MOV     R0,#LOW USB_State
+0002 E2                MOVX    A,@R0
+0003 6404              XRL     A,#04H
+0005 6003              JZ      $ + 5H
+0007 020000      R     LJMP    ?C0055
+000A 7800        E     MOV     R0,#LOW Setup+07H
+C51 COMPILER V9.50a   USB_STANDARD_REQUESTS                                                04/03/2023 15:54:11 PAGE 15  
+
+000C E2                MOVX    A,@R0
+000D 7002              JNZ     ?C0121
+000F 18                DEC     R0
+0010 E2                MOVX    A,@R0
+0011         ?C0121:
+0011 6003              JZ      $ + 5H
+0013 020000      R     LJMP    ?C0055
+                                           ; SOURCE LINE # 216
+                                           ; SOURCE LINE # 217
+0016 7800        E     MOV     R0,#LOW Setup
+0018 E2                MOVX    A,@R0
+0019 24FE              ADD     A,#0FEH
+001B 601E              JZ      ?C0035
+001D 2402              ADD     A,#02H
+001F 6003              JZ      $ + 5H
+0021 020000      R     LJMP    ?C0055
+                                           ; SOURCE LINE # 218
+                                           ; SOURCE LINE # 219
+0024         ?C0033:
+                                           ; SOURCE LINE # 220
+0024 7800        E     MOV     R0,#LOW Setup+03H
+0026 E2                MOVX    A,@R0
+0027 6401              XRL     A,#01H
+0029 7002              JNZ     ?C0122
+002B 18                DEC     R0
+002C E2                MOVX    A,@R0
+002D         ?C0122:
+002D 7077              JNZ     ?C0055
+002F 7800        E     MOV     R0,#LOW Setup+05H
+0031 E2                MOVX    A,@R0
+0032 7002              JNZ     ?C0123
+0034 18                DEC     R0
+0035 E2                MOVX    A,@R0
+0036         ?C0123:
+0036 706E              JNZ     ?C0055
+                                           ; SOURCE LINE # 222
+                                           ; SOURCE LINE # 224
+0038 D200        E     SETB    setup_handled
+                                           ; SOURCE LINE # 225
+                                           ; SOURCE LINE # 226
+003A 22                RET     
+                                           ; SOURCE LINE # 228
+003B         ?C0035:
+                                           ; SOURCE LINE # 229
+003B 7800        E     MOV     R0,#LOW Setup+03H
+003D E2                MOVX    A,@R0
+003E 7002              JNZ     ?C0124
+0040 18                DEC     R0
+0041 E2                MOVX    A,@R0
+0042         ?C0124:
+0042 7062              JNZ     ?C0055
+0044 7800        E     MOV     R0,#LOW Setup+04H
+0046 E2                MOVX    A,@R0
+0047 705D              JNZ     ?C0055
+                                           ; SOURCE LINE # 231
+                                           ; SOURCE LINE # 232
+0049 08                INC     R0
+004A E2                MOVX    A,@R0
+004B 24FE              ADD     A,#0FEH
+004D 6022              JZ      ?C0044
+004F 2480              ADD     A,#080H
+0051 6039              JZ      ?C0049
+C51 COMPILER V9.50a   USB_STANDARD_REQUESTS                                                04/03/2023 15:54:11 PAGE 16  
+
+0053 04                INC     A
+0054 7050              JNZ     ?C0055
+                                           ; SOURCE LINE # 233
+                                           ; SOURCE LINE # 234
+                                           ; SOURCE LINE # 235
+0056         ?C0039:
+0056 E596              MOV     A,USB0ADR
+0058 20E7FB            JB      ACC.7,?C0039
+005B         ?C0040:
+005B 75960E            MOV     USB0ADR,#0EH
+005E 759701            MOV     USB0DAT,#01H
+                                           ; SOURCE LINE # 236
+0061         ?C0041:
+0061 E596              MOV     A,USB0ADR
+0063 20E7FB            JB      ACC.7,?C0041
+0066         ?C0042:
+0066 759611            MOV     USB0ADR,#011H
+0069 759740            MOV     USB0DAT,#040H
+                                           ; SOURCE LINE # 237
+006C C200        E     CLR     Ep_Status1
+                                           ; SOURCE LINE # 238
+006E D200        E     SETB    setup_handled
+                                           ; SOURCE LINE # 239
+0070 22                RET     
+                                           ; SOURCE LINE # 241
+                                           ; SOURCE LINE # 242
+0071         ?C0044:
+0071 E596              MOV     A,USB0ADR
+0073 20E7FB            JB      ACC.7,?C0044
+0076         ?C0045:
+0076 75960E            MOV     USB0ADR,#0EH
+0079 759702            MOV     USB0DAT,#02H
+                                           ; SOURCE LINE # 243
+007C         ?C0046:
+007C E596              MOV     A,USB0ADR
+007E 20E7FB            JB      ACC.7,?C0046
+0081         ?C0047:
+0081 759614            MOV     USB0ADR,#014H
+0084 759780            MOV     USB0DAT,#080H
+                                           ; SOURCE LINE # 244
+0087 C200        E     CLR     Ep_StatusOUT2
+                                           ; SOURCE LINE # 245
+0089 D200        E     SETB    setup_handled
+                                           ; SOURCE LINE # 246
+008B 22                RET     
+                                           ; SOURCE LINE # 248
+                                           ; SOURCE LINE # 249
+008C         ?C0049:
+008C E596              MOV     A,USB0ADR
+008E 20E7FB            JB      ACC.7,?C0049
+0091         ?C0050:
+0091 75960E            MOV     USB0ADR,#0EH
+0094 759702            MOV     USB0DAT,#02H
+                                           ; SOURCE LINE # 250
+0097         ?C0051:
+0097 E596              MOV     A,USB0ADR
+0099 20E7FB            JB      ACC.7,?C0051
+009C         ?C0052:
+009C 759611            MOV     USB0ADR,#011H
+009F 759740            MOV     USB0DAT,#040H
+                                           ; SOURCE LINE # 251
+00A2 C200        E     CLR     Ep_StatusIN2
+C51 COMPILER V9.50a   USB_STANDARD_REQUESTS                                                04/03/2023 15:54:11 PAGE 17  
+
+                                           ; SOURCE LINE # 252
+00A4 D200        E     SETB    setup_handled
+                                           ; SOURCE LINE # 253
+                                           ; SOURCE LINE # 255
+                                           ; SOURCE LINE # 256
+                                           ; SOURCE LINE # 257
+                                           ; SOURCE LINE # 258
+                                           ; SOURCE LINE # 259
+                                           ; SOURCE LINE # 261
+                                           ; SOURCE LINE # 262
+                                           ; SOURCE LINE # 263
+                                           ; SOURCE LINE # 264
+                                           ; SOURCE LINE # 265
+00A6         ?C0055:
+00A6 22                RET     
+             ; FUNCTION Clear_Feature (END)
+
+             ; FUNCTION Set_Feature (BEGIN)
+                                           ; SOURCE LINE # 278
+                                           ; SOURCE LINE # 279
+                                           ; SOURCE LINE # 280
+0000 7800        E     MOV     R0,#LOW USB_State
+0002 E2                MOVX    A,@R0
+0003 6404              XRL     A,#04H
+0005 7054              JNZ     ?C0068
+0007 7800        E     MOV     R0,#LOW Setup+07H
+0009 E2                MOVX    A,@R0
+000A 7002              JNZ     ?C0125
+000C 18                DEC     R0
+000D E2                MOVX    A,@R0
+000E         ?C0125:
+000E 704B              JNZ     ?C0068
+                                           ; SOURCE LINE # 282
+                                           ; SOURCE LINE # 283
+0010 7800        E     MOV     R0,#LOW Setup
+0012 E2                MOVX    A,@R0
+0013 24FE              ADD     A,#0FEH
+0015 601B              JZ      ?C0060
+0017 2402              ADD     A,#02H
+0019 7040              JNZ     ?C0068
+                                           ; SOURCE LINE # 284
+                                           ; SOURCE LINE # 285
+001B         ?C0058:
+                                           ; SOURCE LINE # 286
+001B 7800        E     MOV     R0,#LOW Setup+03H
+001D E2                MOVX    A,@R0
+001E 6401              XRL     A,#01H
+0020 7002              JNZ     ?C0126
+0022 18                DEC     R0
+0023 E2                MOVX    A,@R0
+0024         ?C0126:
+0024 7035              JNZ     ?C0068
+0026 7800        E     MOV     R0,#LOW Setup+05H
+0028 E2                MOVX    A,@R0
+0029 7002              JNZ     ?C0127
+002B 18                DEC     R0
+002C E2                MOVX    A,@R0
+002D         ?C0127:
+002D 702C              JNZ     ?C0068
+                                           ; SOURCE LINE # 288
+                                           ; SOURCE LINE # 290
+002F D200        E     SETB    setup_handled
+C51 COMPILER V9.50a   USB_STANDARD_REQUESTS                                                04/03/2023 15:54:11 PAGE 18  
+
+                                           ; SOURCE LINE # 291
+                                           ; SOURCE LINE # 292
+0031 22                RET     
+                                           ; SOURCE LINE # 294
+0032         ?C0060:
+                                           ; SOURCE LINE # 295
+0032 7800        E     MOV     R0,#LOW Setup+03H
+0034 E2                MOVX    A,@R0
+0035 7002              JNZ     ?C0128
+0037 18                DEC     R0
+0038 E2                MOVX    A,@R0
+0039         ?C0128:
+0039 7020              JNZ     ?C0068
+003B 7800        E     MOV     R0,#LOW Setup+04H
+003D E2                MOVX    A,@R0
+003E 701B              JNZ     ?C0068
+                                           ; SOURCE LINE # 297
+                                           ; SOURCE LINE # 298
+0040 08                INC     R0
+0041 E2                MOVX    A,@R0
+0042 24FE              ADD     A,#0FEH
+0044 600C              JZ      ?C0064
+0046 2480              ADD     A,#080H
+0048 600D              JZ      ?C0065
+004A 04                INC     A
+004B 700E              JNZ     ?C0068
+                                           ; SOURCE LINE # 299
+                                           ; SOURCE LINE # 300
+004D         ?C0063:
+                                           ; SOURCE LINE # 301
+004D D200        E     SETB    Ep_Status1
+                                           ; SOURCE LINE # 302
+004F D200        E     SETB    setup_handled
+                                           ; SOURCE LINE # 303
+0051 22                RET     
+                                           ; SOURCE LINE # 305
+0052         ?C0064:
+                                           ; SOURCE LINE # 306
+0052 D200        E     SETB    Ep_StatusOUT2
+                                           ; SOURCE LINE # 307
+0054 D200        E     SETB    setup_handled
+                                           ; SOURCE LINE # 308
+0056 22                RET     
+                                           ; SOURCE LINE # 310
+0057         ?C0065:
+                                           ; SOURCE LINE # 311
+0057 D200        E     SETB    Ep_StatusIN2
+                                           ; SOURCE LINE # 312
+0059 D200        E     SETB    setup_handled
+                                           ; SOURCE LINE # 313
+                                           ; SOURCE LINE # 315
+                                           ; SOURCE LINE # 316
+                                           ; SOURCE LINE # 317
+                                           ; SOURCE LINE # 318
+                                           ; SOURCE LINE # 319
+                                           ; SOURCE LINE # 321
+                                           ; SOURCE LINE # 322
+                                           ; SOURCE LINE # 323
+                                           ; SOURCE LINE # 324
+                                           ; SOURCE LINE # 325
+005B         ?C0068:
+005B 22                RET     
+C51 COMPILER V9.50a   USB_STANDARD_REQUESTS                                                04/03/2023 15:54:11 PAGE 19  
+
+             ; FUNCTION Set_Feature (END)
+
+             ; FUNCTION Set_Address (BEGIN)
+                                           ; SOURCE LINE # 338
+                                           ; SOURCE LINE # 339
+                                           ; SOURCE LINE # 340
+0000 7800        E     MOV     R0,#LOW Setup
+0002 E2                MOVX    A,@R0
+0003 7039              JNZ     ?C0074
+0005 7800        E     MOV     R0,#LOW Setup+05H
+0007 E2                MOVX    A,@R0
+0008 7002              JNZ     ?C0129
+000A 18                DEC     R0
+000B E2                MOVX    A,@R0
+000C         ?C0129:
+000C 7030              JNZ     ?C0074
+000E 7800        E     MOV     R0,#LOW Setup+07H
+0010 E2                MOVX    A,@R0
+0011 7002              JNZ     ?C0130
+0013 18                DEC     R0
+0014 E2                MOVX    A,@R0
+0015         ?C0130:
+0015 7027              JNZ     ?C0074
+0017 7800        E     MOV     R0,#LOW Setup+02H
+0019 E2                MOVX    A,@R0
+001A 7022              JNZ     ?C0074
+001C 08                INC     R0
+001D E2                MOVX    A,@R0
+001E 20E71D            JB      ACC.7,?C0074
+                                           ; SOURCE LINE # 344
+                                           ; SOURCE LINE # 345
+0021 6014              JZ      ?C0070
+                                           ; SOURCE LINE # 346
+                                           ; SOURCE LINE # 347
+0023         ?C0071:
+0023 E596              MOV     A,USB0ADR
+0025 20E7FB            JB      ACC.7,?C0071
+0028         ?C0072:
+0028 E4                CLR     A
+0029 F596              MOV     USB0ADR,A
+002B 7800        E     MOV     R0,#LOW Setup+03H
+002D E2                MOVX    A,@R0
+002E F597              MOV     USB0DAT,A
+                                           ; SOURCE LINE # 349
+0030 7800        E     MOV     R0,#LOW USB_State
+0032 7403              MOV     A,#03H
+0034 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 350
+0035 8005              SJMP    ?C0073
+0037         ?C0070:
+                                           ; SOURCE LINE # 352
+                                           ; SOURCE LINE # 353
+0037 7800        E     MOV     R0,#LOW USB_State
+0039 7402              MOV     A,#02H
+003B F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 354
+003C         ?C0073:
+                                           ; SOURCE LINE # 355
+003C D200        E     SETB    setup_handled
+                                           ; SOURCE LINE # 356
+                                           ; SOURCE LINE # 357
+003E         ?C0074:
+C51 COMPILER V9.50a   USB_STANDARD_REQUESTS                                                04/03/2023 15:54:11 PAGE 20  
+
+003E 22                RET     
+             ; FUNCTION Set_Address (END)
+
+             ; FUNCTION Get_Descriptor (BEGIN)
+                                           ; SOURCE LINE # 371
+                                           ; SOURCE LINE # 372
+                                           ; SOURCE LINE # 373
+0000 7800        E     MOV     R0,#LOW Setup
+0002 E2                MOVX    A,@R0
+0003 6480              XRL     A,#080H
+0005 6003              JZ      $ + 5H
+0007 020000      R     LJMP    ?C0075
+                                           ; SOURCE LINE # 374
+                                           ; SOURCE LINE # 375
+000A 7800        E     MOV     R0,#LOW Setup+02H
+000C E2                MOVX    A,@R0
+000D 24FE              ADD     A,#0FEH
+000F 6031              JZ      ?C0079
+0011 14                DEC     A
+0012 6052              JZ      ?C0081
+0014 2402              ADD     A,#02H
+0016 6003              JZ      $ + 5H
+0018 020000      R     LJMP    ?C0075
+                                           ; SOURCE LINE # 376
+                                           ; SOURCE LINE # 377
+001B         ?C0077:
+                                           ; SOURCE LINE # 378
+001B 7800        E     MOV     R0,#LOW Setup+03H
+001D E2                MOVX    A,@R0
+001E 6003              JZ      $ + 5H
+0020 020000      R     LJMP    ?C0075
+0023 7800        E     MOV     R0,#LOW Setup+05H
+0025 E2                MOVX    A,@R0
+0026 7002              JNZ     ?C0131
+0028 18                DEC     R0
+0029 E2                MOVX    A,@R0
+002A         ?C0131:
+002A 7074              JNZ     ?C0075
+                                           ; SOURCE LINE # 379
+                                           ; SOURCE LINE # 380
+002C 7800        E     MOV     R0,#LOW DataPtr
+002E 74FF              MOV     A,#0FFH
+0030 F2                MOVX    @R0,A
+0031 08                INC     R0
+0032 7400        E     MOV     A,#HIGH DeviceDesc
+0034 F2                MOVX    @R0,A
+0035 08                INC     R0
+0036 7400        E     MOV     A,#LOW DeviceDesc
+0038 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 381
+0039 7800        E     MOV     R0,#LOW DataSize
+003B E4                CLR     A
+003C F2                MOVX    @R0,A
+003D 08                INC     R0
+003E 7412              MOV     A,#012H
+                                           ; SOURCE LINE # 382
+                                           ; SOURCE LINE # 383
+                                           ; SOURCE LINE # 384
+0040 805B              SJMP    ?C0146
+                                           ; SOURCE LINE # 386
+0042         ?C0079:
+                                           ; SOURCE LINE # 387
+C51 COMPILER V9.50a   USB_STANDARD_REQUESTS                                                04/03/2023 15:54:11 PAGE 21  
+
+0042 7800        E     MOV     R0,#LOW Setup+03H
+0044 E2                MOVX    A,@R0
+0045 7059              JNZ     ?C0075
+0047 7800        E     MOV     R0,#LOW Setup+05H
+0049 E2                MOVX    A,@R0
+004A 7002              JNZ     ?C0132
+004C 18                DEC     R0
+004D E2                MOVX    A,@R0
+004E         ?C0132:
+004E 7050              JNZ     ?C0075
+                                           ; SOURCE LINE # 388
+                                           ; SOURCE LINE # 389
+0050 7800        E     MOV     R0,#LOW DataPtr
+0052 74FF              MOV     A,#0FFH
+0054 F2                MOVX    @R0,A
+0055 08                INC     R0
+0056 7400        E     MOV     A,#HIGH ConfigDescSet
+0058 F2                MOVX    @R0,A
+0059 08                INC     R0
+005A 7400        E     MOV     A,#LOW ConfigDescSet
+005C F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 390
+005D 7800        E     MOV     R0,#LOW DataSize
+005F E4                CLR     A
+0060 F2                MOVX    @R0,A
+0061 08                INC     R0
+0062 7443              MOV     A,#043H
+0064         ?C0145:
+                                           ; SOURCE LINE # 391
+                                           ; SOURCE LINE # 392
+                                           ; SOURCE LINE # 393
+0064 8037              SJMP    ?C0146
+                                           ; SOURCE LINE # 395
+0066         ?C0081:
+                                           ; SOURCE LINE # 397
+0066 7800        E     MOV     R0,#LOW Setup+03H
+0068 E2                MOVX    A,@R0
+0069 FF                MOV     R7,A
+006A C3                CLR     C
+006B 9404              SUBB    A,#04H
+006D 5031              JNC     ?C0075
+                                           ; SOURCE LINE # 398
+                                           ; SOURCE LINE # 399
+006F 75F002            MOV     B,#02H
+0072 EF                MOV     A,R7
+0073 A4                MUL     AB
+0074 2400        E     ADD     A,#LOW StringDescTable
+0076 F582              MOV     DPL,A
+0078 E5F0              MOV     A,B
+007A 3400        E     ADDC    A,#HIGH StringDescTable
+007C F583              MOV     DPH,A
+007E E4                CLR     A
+007F 93                MOVC    A,@A+DPTR
+0080 FE                MOV     R6,A
+0081 7401              MOV     A,#01H
+0083 93                MOVC    A,@A+DPTR
+0084 AA06              MOV     R2,AR6
+0086 F9                MOV     R1,A
+0087 7BFF              MOV     R3,#0FFH
+0089 7800        E     MOV     R0,#LOW DataPtr
+008B EB                MOV     A,R3
+008C F2                MOVX    @R0,A
+C51 COMPILER V9.50a   USB_STANDARD_REQUESTS                                                04/03/2023 15:54:11 PAGE 22  
+
+008D 08                INC     R0
+008E EA                MOV     A,R2
+008F F2                MOVX    @R0,A
+0090 08                INC     R0
+0091 E9                MOV     A,R1
+0092 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 400
+0093 120000      E     LCALL   ?C?CLDPTR
+0096 FF                MOV     R7,A
+0097 7800        E     MOV     R0,#LOW DataSize
+0099 E4                CLR     A
+009A F2                MOVX    @R0,A
+009B 08                INC     R0
+009C EF                MOV     A,R7
+009D         ?C0146:
+009D F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 401
+009E D200        E     SETB    setup_handled
+                                           ; SOURCE LINE # 402
+                                           ; SOURCE LINE # 403
+                                           ; SOURCE LINE # 405
+                                           ; SOURCE LINE # 406
+                                           ; SOURCE LINE # 407
+                                           ; SOURCE LINE # 408
+00A0         ?C0075:
+                                           ; SOURCE LINE # 410
+00A0 30001B      E     JNB     setup_handled,?C0086
+                                           ; SOURCE LINE # 411
+                                           ; SOURCE LINE # 412
+00A3 7800        E     MOV     R0,#LOW Ep_Status0
+00A5 7402              MOV     A,#02H
+00A7 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 413
+00A8 7800        E     MOV     R0,#LOW Setup+06H
+00AA E2                MOVX    A,@R0
+00AB FE                MOV     R6,A
+00AC 08                INC     R0
+00AD E2                MOVX    A,@R0
+00AE FF                MOV     R7,A
+00AF D3                SETB    C
+00B0 7800        E     MOV     R0,#LOW DataSize+01H
+00B2 E2                MOVX    A,@R0
+00B3 9F                SUBB    A,R7
+00B4 18                DEC     R0
+00B5 E2                MOVX    A,@R0
+00B6 9E                SUBB    A,R6
+00B7 4005              JC      ?C0086
+                                           ; SOURCE LINE # 414
+00B9 EE                MOV     A,R6
+00BA F2                MOVX    @R0,A
+00BB 08                INC     R0
+00BC EF                MOV     A,R7
+00BD F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 415
+                                           ; SOURCE LINE # 416
+00BE         ?C0086:
+00BE 22                RET     
+             ; FUNCTION Get_Descriptor (END)
+
+             ; FUNCTION Get_Configuration (BEGIN)
+                                           ; SOURCE LINE # 429
+                                           ; SOURCE LINE # 430
+C51 COMPILER V9.50a   USB_STANDARD_REQUESTS                                                04/03/2023 15:54:11 PAGE 23  
+
+                                           ; SOURCE LINE # 431
+0000 7800        E     MOV     R0,#LOW Setup
+0002 E2                MOVX    A,@R0
+0003 6480              XRL     A,#080H
+0005 7046              JNZ     ?C0087
+0007 7800        E     MOV     R0,#LOW Setup+03H
+0009 E2                MOVX    A,@R0
+000A 7002              JNZ     ?C0133
+000C 18                DEC     R0
+000D E2                MOVX    A,@R0
+000E         ?C0133:
+000E 703D              JNZ     ?C0087
+0010 7800        E     MOV     R0,#LOW Setup+05H
+0012 E2                MOVX    A,@R0
+0013 7002              JNZ     ?C0134
+0015 18                DEC     R0
+0016 E2                MOVX    A,@R0
+0017         ?C0134:
+0017 7034              JNZ     ?C0087
+0019 7800        E     MOV     R0,#LOW Setup+07H
+001B E2                MOVX    A,@R0
+001C 6401              XRL     A,#01H
+001E 7002              JNZ     ?C0135
+0020 18                DEC     R0
+0021 E2                MOVX    A,@R0
+0022         ?C0135:
+0022 7029              JNZ     ?C0087
+                                           ; SOURCE LINE # 435
+                                           ; SOURCE LINE # 436
+0024 7800        E     MOV     R0,#LOW USB_State
+0026 E2                MOVX    A,@R0
+0027 FF                MOV     R7,A
+0028 B4040F            CJNE    A,#04H,?C0088
+                                           ; SOURCE LINE # 437
+                                           ; SOURCE LINE # 438
+002B 7800        E     MOV     R0,#LOW DataPtr
+002D 74FF              MOV     A,#0FFH
+002F F2                MOVX    @R0,A
+0030 08                INC     R0
+0031 7400        R     MOV     A,#HIGH ONES_PACKET
+0033 F2                MOVX    @R0,A
+0034 08                INC     R0
+0035 7400        R     MOV     A,#LOW ONES_PACKET
+0037 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 439
+0038 D200        E     SETB    setup_handled
+                                           ; SOURCE LINE # 440
+003A         ?C0088:
+                                           ; SOURCE LINE # 441
+003A EF                MOV     A,R7
+003B B4030F            CJNE    A,#03H,?C0087
+                                           ; SOURCE LINE # 442
+                                           ; SOURCE LINE # 443
+003E 7800        E     MOV     R0,#LOW DataPtr
+0040 74FF              MOV     A,#0FFH
+0042 F2                MOVX    @R0,A
+0043 08                INC     R0
+0044 7400        R     MOV     A,#HIGH ZERO_PACKET
+0046 F2                MOVX    @R0,A
+0047 08                INC     R0
+0048 7400        R     MOV     A,#LOW ZERO_PACKET
+004A F2                MOVX    @R0,A
+C51 COMPILER V9.50a   USB_STANDARD_REQUESTS                                                04/03/2023 15:54:11 PAGE 24  
+
+                                           ; SOURCE LINE # 444
+004B D200        E     SETB    setup_handled
+                                           ; SOURCE LINE # 445
+                                           ; SOURCE LINE # 446
+004D         ?C0087:
+                                           ; SOURCE LINE # 448
+004D 30000C      E     JNB     setup_handled,?C0091
+                                           ; SOURCE LINE # 449
+                                           ; SOURCE LINE # 451
+0050 7800        E     MOV     R0,#LOW Ep_Status0
+0052 7402              MOV     A,#02H
+0054 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 452
+0055 7800        E     MOV     R0,#LOW DataSize
+0057 E4                CLR     A
+0058 F2                MOVX    @R0,A
+0059 08                INC     R0
+005A 04                INC     A
+005B F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 453
+                                           ; SOURCE LINE # 454
+005C         ?C0091:
+005C 22                RET     
+             ; FUNCTION Get_Configuration (END)
+
+             ; FUNCTION Set_Configuration (BEGIN)
+                                           ; SOURCE LINE # 467
+                                           ; SOURCE LINE # 468
+                                           ; SOURCE LINE # 469
+0000 7800        E     MOV     R0,#LOW Setup
+0002 E2                MOVX    A,@R0
+0003 6003              JZ      $ + 5H
+0005 020000      R     LJMP    ?C0111
+0008 7800        E     MOV     R0,#LOW Setup+05H
+000A E2                MOVX    A,@R0
+000B 7002              JNZ     ?C0136
+000D 18                DEC     R0
+000E E2                MOVX    A,@R0
+000F         ?C0136:
+000F 6003              JZ      $ + 5H
+0011 020000      R     LJMP    ?C0111
+0014 7800        E     MOV     R0,#LOW Setup+07H
+0016 E2                MOVX    A,@R0
+0017 7002              JNZ     ?C0137
+0019 18                DEC     R0
+001A E2                MOVX    A,@R0
+001B         ?C0137:
+001B 6003              JZ      $ + 5H
+001D 020000      R     LJMP    ?C0111
+                                           ; SOURCE LINE # 472
+                                           ; SOURCE LINE # 473
+0020 7800        E     MOV     R0,#LOW Setup+03H
+0022 E2                MOVX    A,@R0
+0023 D3                SETB    C
+0024 9400              SUBB    A,#00H
+0026 406A              JC      ?C0093
+                                           ; SOURCE LINE # 474
+                                           ; SOURCE LINE # 475
+0028 7800        E     MOV     R0,#LOW USB_State
+002A 7404              MOV     A,#04H
+002C F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 484
+C51 COMPILER V9.50a   USB_STANDARD_REQUESTS                                                04/03/2023 15:54:11 PAGE 25  
+
+002D         ?C0094:
+002D E596              MOV     A,USB0ADR
+002F 20E7FB            JB      ACC.7,?C0094
+0032         ?C0095:
+0032 75960E            MOV     USB0ADR,#0EH
+0035 759701            MOV     USB0DAT,#01H
+                                           ; SOURCE LINE # 485
+0038         ?C0096:
+0038 E596              MOV     A,USB0ADR
+003A 20E7FB            JB      ACC.7,?C0096
+003D         ?C0097:
+003D 759612            MOV     USB0ADR,#012H
+0040 759720            MOV     USB0DAT,#020H
+                                           ; SOURCE LINE # 486
+0043         ?C0098:
+0043 E596              MOV     A,USB0ADR
+0045 20E7FB            JB      ACC.7,?C0098
+0048         ?C0099:
+0048 759611            MOV     USB0ADR,#011H
+004B 759740            MOV     USB0DAT,#040H
+                                           ; SOURCE LINE # 487
+004E C200        E     CLR     Ep_Status1
+                                           ; SOURCE LINE # 489
+0050 D200        E     SETB    cs_Line_State_Update
+                                           ; SOURCE LINE # 490
+0052 120000      E     LCALL   Handle_In1
+                                           ; SOURCE LINE # 492
+0055         ?C0100:
+0055 E596              MOV     A,USB0ADR
+0057 20E7FB            JB      ACC.7,?C0100
+005A         ?C0101:
+005A 75960E            MOV     USB0ADR,#0EH
+005D 759702            MOV     USB0DAT,#02H
+                                           ; SOURCE LINE # 493
+0060         ?C0102:
+0060 E596              MOV     A,USB0ADR
+0062 20E7FB            JB      ACC.7,?C0102
+0065         ?C0103:
+0065 759612            MOV     USB0ADR,#012H
+0068 759784            MOV     USB0DAT,#084H
+                                           ; SOURCE LINE # 494
+006B         ?C0104:
+006B E596              MOV     A,USB0ADR
+006D 20E7FB            JB      ACC.7,?C0104
+0070         ?C0105:
+0070 759611            MOV     USB0ADR,#011H
+0073 759740            MOV     USB0DAT,#040H
+                                           ; SOURCE LINE # 495
+0076         ?C0106:
+0076 E596              MOV     A,USB0ADR
+0078 20E7FB            JB      ACC.7,?C0106
+007B         ?C0107:
+007B 759615            MOV     USB0ADR,#015H
+007E 759780            MOV     USB0DAT,#080H
+                                           ; SOURCE LINE # 496
+0081         ?C0108:
+0081 E596              MOV     A,USB0ADR
+0083 20E7FB            JB      ACC.7,?C0108
+0086         ?C0109:
+0086 759614            MOV     USB0ADR,#014H
+0089 759780            MOV     USB0DAT,#080H
+                                           ; SOURCE LINE # 497
+C51 COMPILER V9.50a   USB_STANDARD_REQUESTS                                                04/03/2023 15:54:11 PAGE 26  
+
+008C C200        E     CLR     Ep_StatusOUT2
+                                           ; SOURCE LINE # 498
+008E C200        E     CLR     Ep_StatusIN2
+                                           ; SOURCE LINE # 499
+0090 800B              SJMP    ?C0110
+0092         ?C0093:
+                                           ; SOURCE LINE # 501
+                                           ; SOURCE LINE # 502
+0092 7800        E     MOV     R0,#LOW USB_State
+0094 7403              MOV     A,#03H
+0096 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 503
+0097 D200        E     SETB    Ep_Status1
+                                           ; SOURCE LINE # 504
+0099 D200        E     SETB    Ep_StatusOUT2
+                                           ; SOURCE LINE # 505
+009B D200        E     SETB    Ep_StatusIN2
+                                           ; SOURCE LINE # 506
+009D         ?C0110:
+                                           ; SOURCE LINE # 508
+009D D200        E     SETB    setup_handled
+                                           ; SOURCE LINE # 509
+                                           ; SOURCE LINE # 510
+009F         ?C0111:
+009F 22                RET     
+             ; FUNCTION Set_Configuration (END)
+
+             ; FUNCTION Get_Interface (BEGIN)
+                                           ; SOURCE LINE # 524
+                                           ; SOURCE LINE # 525
+                                           ; SOURCE LINE # 526
+0000 7800        E     MOV     R0,#LOW USB_State
+0002 E2                MOVX    A,@R0
+0003 6404              XRL     A,#04H
+0005 7042              JNZ     ?C0113
+0007 7800        E     MOV     R0,#LOW Setup
+0009 E2                MOVX    A,@R0
+000A 6481              XRL     A,#081H
+000C 703B              JNZ     ?C0113
+000E 7800        E     MOV     R0,#LOW Setup+03H
+0010 E2                MOVX    A,@R0
+0011 7002              JNZ     ?C0138
+0013 18                DEC     R0
+0014 E2                MOVX    A,@R0
+0015         ?C0138:
+0015 7032              JNZ     ?C0113
+0017 C3                CLR     C
+0018 7800        E     MOV     R0,#LOW Setup+05H
+001A E2                MOVX    A,@R0
+001B 9402              SUBB    A,#02H
+001D 18                DEC     R0
+001E E2                MOVX    A,@R0
+001F 9400              SUBB    A,#00H
+0021 5026              JNC     ?C0113
+0023 7800        E     MOV     R0,#LOW Setup+07H
+0025 E2                MOVX    A,@R0
+0026 6401              XRL     A,#01H
+0028 7002              JNZ     ?C0139
+002A 18                DEC     R0
+002B E2                MOVX    A,@R0
+002C         ?C0139:
+002C 701B              JNZ     ?C0113
+C51 COMPILER V9.50a   USB_STANDARD_REQUESTS                                                04/03/2023 15:54:11 PAGE 27  
+
+                                           ; SOURCE LINE # 531
+                                           ; SOURCE LINE # 532
+002E 7800        E     MOV     R0,#LOW DataPtr
+0030 74FF              MOV     A,#0FFH
+0032 F2                MOVX    @R0,A
+0033 08                INC     R0
+0034 7400        R     MOV     A,#HIGH ZERO_PACKET
+0036 F2                MOVX    @R0,A
+0037 08                INC     R0
+0038 7400        R     MOV     A,#LOW ZERO_PACKET
+003A F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 533
+003B 7800        E     MOV     R0,#LOW Ep_Status0
+003D 7402              MOV     A,#02H
+003F F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 534
+0040 7800        E     MOV     R0,#LOW DataSize
+0042 E4                CLR     A
+0043 F2                MOVX    @R0,A
+0044 08                INC     R0
+0045 04                INC     A
+0046 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 535
+0047 D200        E     SETB    setup_handled
+                                           ; SOURCE LINE # 536
+                                           ; SOURCE LINE # 537
+0049         ?C0113:
+0049 22                RET     
+             ; FUNCTION Get_Interface (END)
+
+             ; FUNCTION Set_Interface (BEGIN)
+                                           ; SOURCE LINE # 552
+                                           ; SOURCE LINE # 553
+                                           ; SOURCE LINE # 556
+0000 7800        E     MOV     R0,#LOW Setup
+0002 E2                MOVX    A,@R0
+0003 B40120            CJNE    A,#01H,?C0115
+0006 7800        E     MOV     R0,#LOW Setup+03H
+0008 E2                MOVX    A,@R0
+0009 7002              JNZ     ?C0140
+000B 18                DEC     R0
+000C E2                MOVX    A,@R0
+000D         ?C0140:
+000D 7017              JNZ     ?C0115
+000F C3                CLR     C
+0010 7800        E     MOV     R0,#LOW Setup+05H
+0012 E2                MOVX    A,@R0
+0013 9402              SUBB    A,#02H
+0015 18                DEC     R0
+0016 E2                MOVX    A,@R0
+0017 9400              SUBB    A,#00H
+0019 500B              JNC     ?C0115
+001B 7800        E     MOV     R0,#LOW Setup+07H
+001D E2                MOVX    A,@R0
+001E 7002              JNZ     ?C0141
+0020 18                DEC     R0
+0021 E2                MOVX    A,@R0
+0022         ?C0141:
+0022 7002              JNZ     ?C0115
+                                           ; SOURCE LINE # 560
+                                           ; SOURCE LINE # 562
+0024 D200        E     SETB    setup_handled
+C51 COMPILER V9.50a   USB_STANDARD_REQUESTS                                                04/03/2023 15:54:11 PAGE 28  
+
+                                           ; SOURCE LINE # 563
+                                           ; SOURCE LINE # 564
+0026         ?C0115:
+0026 22                RET     
+             ; FUNCTION Set_Interface (END)
+
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =   1130    ----
+   CONSTANT SIZE    =      4    ----
+   XDATA SIZE       =   ----    ----
+   PDATA SIZE       =   ----    ----
+   DATA SIZE        =   ----    ----
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =   ----       1
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

@@ -1,0 +1,32 @@
+#ifndef volkov_h
+#define volkov_h
+
+#define CHNUM           2
+#define TBUF_SIZE		32							// Must be one of these powers of 2 (2,4,8,16,32,64,128)
+#define RBUF_SIZE		32							// Must be one of these powers of 2 (2,4,8,16,32,64,128)
+
+#define START		0xAA
+#define STOP		0xAB
+#define SHIFT		0xAC
+
+void VolkovEnable(unsigned char nch);
+void VolkovDisable(unsigned char nch);
+void InitVolkov(unsigned char nch);
+void RX_irq(unsigned char nch);
+void TX_irq(unsigned char nch);
+void wait_end_of_send(unsigned char nch);
+void put_char(unsigned char nch, unsigned char dat);
+void BeginSend(unsigned char nch);
+void FinishSend(unsigned char nch);
+unsigned char get_t_in(unsigned char nch);
+void volkovsend(unsigned char nch, unsigned char *curbuf, unsigned long cursize);
+long int volkovread(unsigned char nch, unsigned char *curbuf, unsigned long cursize);
+unsigned char com_read_ready(unsigned char nch);
+unsigned char get_live_flag(unsigned char nch);
+unsigned char com_tbuflen (unsigned char nch);
+unsigned char com_rbuflen (unsigned char nch);
+void com_putchar(unsigned char nch, unsigned char c);
+unsigned char com_getchar(unsigned char nch);
+void Set_adr_PLC(unsigned char nch, unsigned char adr);
+
+#endif

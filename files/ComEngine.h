@@ -1,0 +1,34 @@
+#ifndef ComEngine_h
+#define ComEngine_h
+
+
+
+typedef union {long i; char c[4];} DWORD;
+
+void SendByte_volkovStyle(unsigned char nch, unsigned char adr, int N);
+void clear_buf();
+int identify();
+int repeat_last_ans();
+int get_state();
+int move(long Nstep, unsigned char STOPCOND);
+int move_without_ac(long Nstep, unsigned char STOPCOND);
+int config(unsigned char mov_cur, unsigned char hold_cur, unsigned char hold_delay, unsigned char CFG);
+int speed(unsigned int min_speed, unsigned int max_speed, unsigned int acceleration);
+int forced_stop();
+int off_curr();
+int save_param();
+int set_imp(unsigned int N, unsigned int Nstart, unsigned int Nrepeat);
+int missed_steps();
+int read_config();
+int read_speed();
+int calibration(long Period);
+int move_precision_accuracy(long Nstep, long dt);
+int output_imp();
+int set_abs_coord(long coord);
+int get_abs_coord();
+int syncr(unsigned char flags);
+int set_addr_2(unsigned int num, unsigned char rate, unsigned char addr);
+int set_addr_1(unsigned char rate, unsigned char addr);
+
+
+#endif 

@@ -1,0 +1,8 @@
+#include <c8051F340.h>
+
+volatile unsigned char xdata extmas[0x1000]			_at_   0x1000;
+
+void init_exram(void)
+{
+  EMI0CF=0x1B;
+}

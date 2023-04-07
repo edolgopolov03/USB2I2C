@@ -1,0 +1,1523 @@
+C51 COMPILER V9.50a   USB_ISR                                                              04/03/2023 15:54:11 PAGE 1   
+
+
+C51 COMPILER V9.50a, COMPILATION OF MODULE USB_ISR
+OBJECT MODULE PLACED IN USB_ISR.OBJ
+COMPILER INVOKED BY: C:\Keil\C51\BIN\C51.exe USB_ISR.c DB OE CD INCDIR(c:\SiLabs\MCU\Inc) COMPACT
+
+line level    source
+
+   1          //-----------------------------------------------------------------------------
+   2          // USB_ISR.c
+   3          //-----------------------------------------------------------------------------
+   4          // Copyright 2005 Silicon Laboratories, Inc.
+   5          // http://www.silabs.com
+   6          //
+   7          // Program Description:
+   8          //
+   9          // Source file for USB firmware. Includes top level ISR with Setup,
+  10          // and Endpoint data handlers.  Also includes routine for USB suspend,
+  11          // reset, and procedural stall.
+  12          //
+  13          //
+  14          // How To Test:         See Readme.txt
+  15          //
+  16          //
+  17          // FID:                         32X000023
+  18          // Target:                      C8051F32x
+  19          // Tool chain:          Keil C51 7.50 / Keil EVAL C51
+  20          //                                      Silicon Laboratories IDE version 2.6
+  21          // Command Line:         See Readme.txt
+  22          // Project Name:         F32x_USB_Interrupt
+  23          //
+  24          //
+  25          // Release 1.3
+  26          //        -All changes by GP
+  27          //        -22 NOV 2005
+  28          //        -Changed revision number to match project revision
+  29          //        -Modified file to fit new formatting guidelines
+  30          //        -Changed file name from USB_ISR.c
+  31          //        -Removed extraneous code that was commented out
+  32          //        -Added USB Suspend code
+  33          //       
+  34          // Release 1.0
+  35          //        -Initial Revision (DM)
+  36          //        -08 NOV 2002
+  37          //
+  38          
+  39          //-----------------------------------------------------------------------------
+  40          // Includes
+  41          //-----------------------------------------------------------------------------
+  42          
+  43          #include "USB_CDC_Type.h"
+  44          #include "USB_Register.h"
+  45          #include "USB_Descriptor.h"
+  46          #include "USB_Standard_Requests.h"
+  47          
+  48          //-----------------------------------------------------------------------------
+  49          // Global Externs
+  50          //-----------------------------------------------------------------------------
+  51          
+  52          //-----------------------------------------------------------------------------
+  53          // Global Variables
+  54          //-----------------------------------------------------------------------------
+  55          
+C51 COMPILER V9.50a   USB_ISR                                                              04/03/2023 15:54:11 PAGE 2   
+
+  56          BYTE USB_State;                                                 // Holds the current USB State
+  57                                                                                          // def. in USB_Main.h
+  58          
+  59          Tsetup_buffer Setup;                                    // Buffer for current device request
+  60          bit   setup_handled;                                    // flag that indicates setup stage is handled or not
+  61          UINT  DataSize;                                                 // Size of data to return
+  62          BYTE* DataPtr;                                                  // Pointer to data to return
+  63          bit   send_eq_requested;                                // flag that indicates that the data to send on TX
+  64                                                                                          // equals to the requested by Setup wLength
+  65          
+  66          // Holds the status for each endpoint
+  67          BYTE Ep_Status0   = EP_IDLE;
+  68          bit Ep_Status1    = EP_HALT;
+  69          bit Ep_StatusIN2  = EP_HALT;
+  70          bit Ep_StatusOUT2 = EP_HALT;
+  71          
+  72          //-----------------------------------------------------------------------------
+  73          // Interrupt Service Routines
+  74          //-----------------------------------------------------------------------------
+  75          
+  76          //-----------------------------------------------------------------------------
+  77          // Usb_ISR
+  78          //-----------------------------------------------------------------------------
+  79          //
+  80          // Called after any USB type interrupt, this handler determines which type
+  81          // of interrupt occurred, and calls the specific routine to handle it.
+  82          //
+  83          //-----------------------------------------------------------------------------
+  84          void Usb_ISR(void) interrupt 8                  // Top-level USB ISR
+  85          {
+  86   1              BYTE bCommon, bIn, bOut;
+  87   1              POLL_READ_BYTE(CMINT, bCommon);         // Read all interrupt registers
+  88   1              POLL_READ_BYTE(IN1INT, bIn);            // this read also clears the register
+  89   1              POLL_READ_BYTE(OUT1INT, bOut);
+  90   1              {
+  91   2      /*
+  92   2                      if (bCommon & rbRSUINT)                 // Handle Resume interrupt
+  93   2                      {
+  94   2                              Usb_Resume();
+  95   2                      }
+  96   2      */
+  97   2                      if (bCommon & rbRSTINT)                 // Handle Reset interrupt
+  98   2                      {
+  99   3                              Usb_Reset();
+ 100   3                      }
+ 101   2                      if (bCommon & rbSOF)                    // SOF interrupt
+ 102   2                      {
+ 103   3                              Handle_EP_HALT();
+ 104   3                              Handle_In1();                           // Handle IN1 EP (Notification)
+ 105   3                      }
+ 106   2                      if (bIn & rbEP0)                                // Handle Setup packet received
+ 107   2                      {                                                               // or packet transmitted if Endpoint 0
+ 108   3                              Handle_Setup();                         // is transmit mode
+ 109   3                      }
+ 110   2                      if (bCommon & rbSUSINT)                 // Handle Suspend interrupt
+ 111   2                      {
+ 112   3                              Usb_Suspend();
+ 113   3                      }
+ 114   2              }
+ 115   1      }
+ 116          
+ 117          //-----------------------------------------------------------------------------
+C51 COMPILER V9.50a   USB_ISR                                                              04/03/2023 15:54:11 PAGE 3   
+
+ 118          // Support Routines for ISR
+ 119          //-----------------------------------------------------------------------------
+ 120          
+ 121          //-----------------------------------------------------------------------------
+ 122          // SDCC suport
+ 123          //-----------------------------------------------------------------------------
+ 124          #if defined SDCC
+              #pragma nooverlay
+              #endif // SDCC
+ 127          
+ 128          //-----------------------------------------------------------------------------
+ 129          // Usb_Reset
+ 130          //-----------------------------------------------------------------------------
+ 131          //
+ 132          // Return Value : None
+ 133          // Parameters   : None
+ 134          //
+ 135          // - Set state to default
+ 136          // - Clear Usb Inhibit bit
+ 137          //
+ 138          //-----------------------------------------------------------------------------
+ 139          
+ 140          void Usb_Reset(void)
+ 141          {
+ 142   1              POLL_WRITE_BYTE(IN1IE,  0x01);          // Disable all IN and OUT EP interrupt except Ep0
+ 143   1              POLL_WRITE_BYTE(OUT1IE, 0x00);
+ 144   1              POLL_WRITE_BYTE(CMIE,   0x0D);          // Enable SOF, Reset, Suspend interrupts
+ 145   1      
+ 146   1              POLL_WRITE_BYTE(POWER, 0x01);           // Clear usb inhibit bit to enable USB
+ 147   1                                                                                      // suspend detection
+ 148   1      
+ 149   1              USB_State = DEV_DEFAULT;                        // Set device state to default
+ 150   1      
+ 151   1              Ep_Status0 = EP_IDLE;                           // Set default Endpoint Status
+ 152   1              Ep_Status1 = EP_HALT;
+ 153   1              Ep_StatusOUT2 = EP_HALT;
+ 154   1              Ep_StatusIN2  = EP_HALT;
+ 155   1      }
+ 156          
+ 157          //-----------------------------------------------------------------------------
+ 158          // Handle_Setup
+ 159          //-----------------------------------------------------------------------------
+ 160          //
+ 161          // Return Value : None
+ 162          // Parameters   : None
+ 163          //
+ 164          // - Decode Incoming Setup requests
+ 165          // - Load data packets on fifo while in transmit mode
+ 166          //
+ 167          //-----------------------------------------------------------------------------
+ 168          
+ 169          void Handle_Setup(void)
+ 170          {
+ 171   1              BYTE ControlReg, TempReg, dataCount;    // Temporary storage for EP control
+ 172   1                                                                                      // register
+ 173   1      
+ 174   1              POLL_WRITE_BYTE(INDEX, 0);                      // Set Index to Endpoint Zero
+ 175   1              POLL_READ_BYTE(E0CSR, ControlReg);      // Read control register
+ 176   1      
+ 177   1              if (ControlReg & rbSTSTL)                       // If last packet was a sent stall, reset
+ 178   1              {                                                                       // STSTL bit and return EP0 to idle state
+ 179   2                      POLL_WRITE_BYTE(E0CSR, 0);
+C51 COMPILER V9.50a   USB_ISR                                                              04/03/2023 15:54:11 PAGE 4   
+
+ 180   2                      Ep_Status0 = EP_IDLE;
+ 181   2                      return;
+ 182   2              }
+ 183   1      
+ 184   1              if (ControlReg & rbSUEND)                       // SUEND bit is asserted after status stage by SIE
+ 185   1              {                                                                       // or when SIE receives early SETUP
+ 186   2                      POLL_WRITE_BYTE(E0CSR, rbSSUEND);       // Serviced Setup End bit and return to EP_IDLE
+ 187   2                      Ep_Status0 = EP_IDLE;
+ 188   2              }
+ 189   1      
+ 190   1              if (Ep_Status0 == EP_IDLE)                      // If Endpoint 0 is in idle mode
+ 191   1              {
+ 192   2                      if (ControlReg & rbOPRDY)               // Make sure that EP 0 has an Out Packet ready from host
+ 193   2                      {                                                               // although if EP0 is idle, this should always be the case
+ 194   3                              Fifo_Read(FIFO_EP0, 8, (BYTE *)&Setup);
+ 195   3                                                                                      // Get Setup Packet off of Fifo
+ 196   3      #if defined BIG_ENDIAN
+ 197   3                                                                                      // As the USB custom, multi-byte number is LSB first - little endian
+ 198   3                              Setup.wValue.i  = ((UINT)Setup.wValue.c[1]  << 8) | Setup.wValue.c[0];
+ 199   3                              Setup.wIndex.i  = ((UINT)Setup.wIndex.c[1]  << 8) | Setup.wIndex.c[0];
+ 200   3                              Setup.wLength.i = ((UINT)Setup.wLength.c[1] << 8) | Setup.wLength.c[0];
+ 201   3      #endif // end of BIG_ENDIAN
+ 202   3      
+ 203   3                              setup_handled = FALSE;
+ 204   3                              switch ( Setup.bmRequestType & DRT_MASK )       // Device Request Type
+ 205   3                              {
+ 206   4                                      case DRT_STD:                                                   // Standard device request
+ 207   4                                              Standard_Device_Request();
+ 208   4                                              break;
+ 209   4                                      case DRT_CLASS:
+ 210   4                                              Class_Request();
+ 211   4                                              break;
+ 212   4                                      case DRT_VENDOR:
+ 213   4                                              Vendor_Request();
+ 214   4                                              break;
+ 215   4                                      default:
+ 216   4                                              break;
+ 217   4                              }
+ 218   3      
+ 219   3                              POLL_WRITE_BYTE(INDEX, 0);                                      // Assure the indexed registers are accessed correctly
+ 220   3                              if ( setup_handled )
+ 221   3                              {
+ 222   4                                      POLL_WRITE_BYTE(E0CSR, rbSOPRDY);               // Tell to SIE that the setup is handled
+ 223   4                              } else {
+ 224   4                                                                                                                      // Return STALL to the host
+ 225   4                                      POLL_WRITE_BYTE(E0CSR, rbSDSTL);                // Set the send stall bit
+ 226   4                                      Ep_Status0 = EP_STALL;                                  // Put the endpoint in stall status
+ 227   4                              }
+ 228   3      
+ 229   3                              send_eq_requested = (DataSize == Setup.wLength.i);      // get this flag before DataSize 
+ 230   3                                                                                                                                      // is reduced in TX cycle
+ 231   3                      }
+ 232   2              } // end of EP_IDLE
+ 233   1      
+ 234   1              if ( Ep_Status0 == EP_TX )                      // See if the endpoint has data to transmit to host
+ 235   1              {
+ 236   2                      if ( !(ControlReg & rbINPRDY) ) // Make sure you don't overwrite last packet
+ 237   2                      {                       
+ 238   3                              POLL_READ_BYTE( E0CSR, ControlReg );
+ 239   3                                                                                      // Read control register
+ 240   3      
+ 241   3                              if ( (!(ControlReg & rbSUEND)) || (!(ControlReg & rbOPRDY)) )
+C51 COMPILER V9.50a   USB_ISR                                                              04/03/2023 15:54:11 PAGE 5   
+
+ 242   3                                                                                      // Check to see if Setup End or Out Packet received, if so
+ 243   3                                                                                      // do not put any new data on FIFO
+ 244   3                              {
+ 245   4                                      TempReg = rbINPRDY;             // Add In Packet ready flag to E0CSR bitmask
+ 246   4                                                                                      // Break Data into multiple packets if larger than Max Packet
+ 247   4                                      if (DataSize >= EP0_PACKET_SIZE)
+ 248   4                                      {                                                                       // The data size to send in this cycle is
+ 249   5                                                                                                              // just EP0_PACKET_SIZE
+ 250   5                                              Fifo_Write( FIFO_EP0, EP0_PACKET_SIZE, (BYTE *)DataPtr );
+ 251   5                                              DataPtr += EP0_PACKET_SIZE;                     // Advance data pointer
+ 252   5                                              DataSize -= EP0_PACKET_SIZE;            // Decrement data size
+ 253   5                                              if ( send_eq_requested && (DataSize == 0) )     // In this case, no need to send ZLP,
+ 254   5                                              {                                                                                       // finish TX immediately
+ 255   6                                                      TempReg |= rbDATAEND;
+ 256   6                                                      Ep_Status0 = EP_IDLE;   
+ 257   6                                              }
+ 258   5                                      } else {                                                        // The data size to send in this cycle is
+ 259   5                                                                                                              // smaller than EP0_PACKET_SIZE or zero (ZLP)
+ 260   5                                              Fifo_Write( FIFO_EP0, (BYTE)DataSize, (BYTE *)DataPtr );
+ 261   5                                              TempReg |= rbDATAEND;
+ 262   5                                              Ep_Status0 = EP_IDLE;
+ 263   5                                      }
+ 264   4                                      POLL_WRITE_BYTE(E0CSR, TempReg);                // Write mask to E0CSR
+ 265   4                              }
+ 266   3                      }
+ 267   2              } // end of EP_TX
+ 268   1      
+ 269   1              if (Ep_Status0 == EP_RX)                        // See if endpoint should receive
+ 270   1              {
+ 271   2                      POLL_READ_BYTE( E0CSR, ControlReg );    // Read control register
+ 272   2                      if ( ControlReg & rbOPRDY )                             // Verify packet was received
+ 273   2                      {
+ 274   3                              ControlReg = rbSOPRDY;
+ 275   3      
+ 276   3                              POLL_READ_BYTE( E0CNT, dataCount );     // get data bytes on the FIFO
+ 277   3                              Fifo_Read( FIFO_EP0, dataCount, (BYTE*)DataPtr );
+ 278   3                                                                                              // Empty the FIFO
+ 279   3                                                                                                      // FIFO must be read out just the size it has,
+ 280   3                                                                                                      // otherwize the FIFO pointer on the SIE goes out of synch.
+ 281   3                              DataPtr += dataCount;                   // Advance the pointer
+ 282   3                              if ( DataSize > dataCount )             // Update the scheduled number to be received
+ 283   3                                      DataSize -= dataCount;
+ 284   3                              else {                                                  // Meet the end of the data stage
+ 285   4                                      DataSize = 0;
+ 286   4                                      ControlReg |= rbDATAEND;        // Signal end of data stage
+ 287   4                                      Ep_Status0 = EP_IDLE;           // Set Endpoint to IDLE
+ 288   4      
+ 289   4                                      if (   (Setup.bRequest == SET_LINE_CODING)              // completion routine for Set_Line_Coding
+ 290   4                                              && (Setup.bmRequestType == OUT_CL_INTERFACE) )
+ 291   4                                              CS_Set_Line_Coding_Complete();
+ 292   4                              }
+ 293   3      
+ 294   3                              POLL_WRITE_BYTE ( E0CSR, ControlReg );
+ 295   3                      }
+ 296   2              } // end of EP_RX
+ 297   1      
+ 298   1      }
+ 299          
+ 300          //-----------------------------------------------------------------------------
+ 301          // Usb_Suspend
+ 302          //-----------------------------------------------------------------------------
+ 303          //
+C51 COMPILER V9.50a   USB_ISR                                                              04/03/2023 15:54:11 PAGE 6   
+
+ 304          // Return Value : None
+ 305          // Parameters   : None
+ 306          //
+ 307          // Enter suspend mode after suspend signalling is present on the bus
+ 308          //
+ 309          //-----------------------------------------------------------------------------
+ 310          
+ 311          void Usb_Suspend(void)
+ 312          {                       
+ 313   1              // Put the device in a low power configuration
+ 314   1              P0MDIN  = 0x00;                                         // Port 0 configured as analog input
+ 315   1              P1MDIN  = 0x00;                                         // Port 1 configured as analog input
+ 316   1              P2MDIN  = 0x00;                                         // Port 2 configured as analog input
+ 317   1              P3MDIN  = 0x00;                                         // Port 3 configured as analog input
+ 318   1      
+ 319   1      //      ADC0CN &= ~0x80;                                        // Disable ADC0
+ 320   1      //      REF0CN  = 0x00;                                         // Disable voltage reference
+ 321   1      
+ 322   1              OSCICN |= 0x20;                                         // Put oscillator to suspend
+ 323   1      
+ 324   1              // When the device receives a non-idle USB event, it will resume execution
+ 325   1              // on the instruction that follows OSCICN |= 0x20.              
+ 326   1      
+ 327   1              // Re-enable everything that was disabled when going into Suspend
+ 328   1      #if defined C8051F320_H
+                      P0MDIN  = 0xFF;                                         // Port 0 configured as diital input
+                      P1MDIN  = 0x7F;                                         // Port 1 pin 7 set as analog input
+                      P2MDIN  = 0xFF;                                         // Port 2 configured as diital input
+                      P3MDIN  = 0xFF;                                         // Port 3 configured as diital input
+              #endif // C8051F320_H
+ 334   1      
+ 335   1      #if defined C8051F340_H
+ 336   1              P0MDIN  = 0xFF;                                         // Port 0 configured as diital input
+ 337   1              P1MDIN  = 0xFF;                                         // Port 1 configured as diital input
+ 338   1              P2MDIN  = ~(0x20);                                      // Port 2 pin 5 set as analog input
+ 339   1              P3MDIN  = 0xFF;                                         // Port 3 configured as diital input
+ 340   1      #endif // C8051F340_H
+ 341   1      
+ 342   1      
+ 343   1      //      REF0CN  = 0x0E;                                         // Enable voltage reference VREF
+ 344   1      //      ADC0CN |= 0x80;                                         // Re-enable ADC
+ 345   1      
+ 346   1      }
+ 347          
+ 348          //-----------------------------------------------------------------------------
+ 349          // Usb_Resume
+ 350          //-----------------------------------------------------------------------------
+ 351          //
+ 352          // Return Value : None
+ 353          // Parameters   : None
+ 354          //
+ 355          // Resume normal USB operation
+ 356          //
+ 357          //-----------------------------------------------------------------------------
+ 358          /*
+ 359          void Usb_Resume(void)
+ 360          {
+ 361                  volatile int k;
+ 362          
+ 363                  k++;
+ 364          
+ 365                  // Add code for resume
+C51 COMPILER V9.50a   USB_ISR                                                              04/03/2023 15:54:11 PAGE 7   
+
+ 366          }
+ 367          */
+ 368          
+ 369          //-----------------------------------------------------------------------------
+ 370          // Handle_EP_HALT
+ 371          //-----------------------------------------------------------------------------
+ 372          //
+ 373          // Return Value : None
+ 374          // Parameters   : None
+ 375          //
+ 376          // Handle endpoint HALT status, except EP0
+ 377          //
+ 378          //-----------------------------------------------------------------------------
+ 379          
+ 380          void Handle_EP_HALT(void)
+ 381          {
+ 382   1              BYTE ControlReg;
+ 383   1      
+ 384   1              // IN EP1
+ 385   1              POLL_WRITE_BYTE(INDEX, 1);                              // Set index to endpoint 1 registers
+ 386   1              POLL_READ_BYTE(EINCSR1, ControlReg);    // Read contol register for EP
+ 387   1              if (Ep_Status1 == EP_HALT)                              // If endpoint is currently halted, send a stall
+ 388   1              {
+ 389   2                      POLL_WRITE_BYTE(EINCSR1, rbInSDSTL);
+ 390   2              }
+ 391   1              else
+ 392   1              {
+ 393   2                      if (ControlReg & rbInSTSTL)                     // Clear sent stall if last packet returned a stall
+ 394   2                      {
+ 395   3                              POLL_WRITE_BYTE(EINCSR1, 0);
+ 396   3                      }
+ 397   2              }
+ 398   1      
+ 399   1              // IN EP2
+ 400   1              POLL_WRITE_BYTE(INDEX, 2);                              // Set index to endpoint 2 registers
+ 401   1              POLL_READ_BYTE(EINCSR1, ControlReg);    // Read contol register for EP
+ 402   1              if (Ep_StatusIN2 == EP_HALT)                    // If endpoint is currently halted, send a stall
+ 403   1              {
+ 404   2                      POLL_WRITE_BYTE(EINCSR1, rbInSDSTL);
+ 405   2              }
+ 406   1              else
+ 407   1              {
+ 408   2                      if (ControlReg & rbInSTSTL)                     // Clear sent stall if last packet returned a stall
+ 409   2                      {
+ 410   3                              POLL_WRITE_BYTE(EINCSR1, 0);
+ 411   3                      }
+ 412   2              }
+ 413   1      
+ 414   1              // OUT EP2
+ 415   1              POLL_READ_BYTE(EOUTCSR1, ControlReg);   // Read contol register for EP
+ 416   1              if (Ep_StatusOUT2 == EP_HALT)                   // If endpoint is halted, send a stall
+ 417   1              {
+ 418   2                      POLL_WRITE_BYTE(EOUTCSR1, rbOutSDSTL | rbOutOPRDY);     // preserve OPRDY bit
+ 419   2              }
+ 420   1              else
+ 421   1              {
+ 422   2                      if (ControlReg & rbOutSTSTL)    // Clear sent stall bit if last packet was a stall
+ 423   2                      {
+ 424   3                              POLL_WRITE_BYTE(EOUTCSR1, rbOutOPRDY);                  // preserve OPRDY bit
+ 425   3                      }
+ 426   2              }
+ 427   1      }
+C51 COMPILER V9.50a   USB_ISR                                                              04/03/2023 15:54:11 PAGE 8   
+
+ 428          
+ 429          //-----------------------------------------------------------------------------
+ 430          // Fifo_Read
+ 431          //-----------------------------------------------------------------------------
+ 432          //
+ 433          // Return Value : None
+ 434          // Parameters   :
+ 435          //                                      1) BYTE addr : target address
+ 436          //                                      2) BYTE uNumBytes : number of bytes to unload
+ 437          //                                      3) BYTE * pData : read data destination
+ 438          //
+ 439          // Read from the selected endpoint FIFO
+ 440          //
+ 441          //-----------------------------------------------------------------------------
+ 442          
+ 443          void Fifo_Read(BYTE addr, BYTE uNumBytes, BYTE * pData)
+ 444          {
+ 445   1              if (uNumBytes)                                                  // Check if >0 bytes requested,
+ 446   1              {
+ 447   2                      if ( --uNumBytes == 0 )
+ 448   2                      {
+ 449   3                              USB0ADR = addr | 0x80;                  // Set address and initiate read
+ 450   3                              while(USB0ADR & 0x80);                  // Wait for BUSY->'0' (data ready)
+ 451   3                              *pData = USB0DAT;                               // Copy data byte
+ 452   3                              return;
+ 453   3                      }
+ 454   2                      else
+ 455   2                      {
+ 456   3                              USB0ADR = addr | 0xC0;                  // Set address
+ 457   3                                                                                              // Set auto-read and initiate
+ 458   3                                                                                              // first read
+ 459   3      
+ 460   3                              // Unload <NumBytes> from the selected FIFO
+ 461   3                              do
+ 462   3                              {
+ 463   4                                      while(USB0ADR & 0x80);          // Wait for BUSY->'0' (data ready)
+ 464   4                                      //*pData++ = USB0DAT;           // Copy data byte
+ 465   4                                      *pData = USB0DAT;                       // splitting it result better asm code (Keil)
+ 466   4                                      pData++;
+ 467   4                              } while ( --uNumBytes != 0 );
+ 468   3      
+ 469   3                              while(USB0ADR & 0x80);                  // Wait for BUSY->'0' (data ready)
+ 470   3                              USB0ADR = 0;                                    // Clear auto-read
+ 471   3                              *pData = USB0DAT;                               // Copy data byte
+ 472   3                      }
+ 473   2              }
+ 474   1      }
+ 475          
+ 476          //-----------------------------------------------------------------------------
+ 477          // Fifo_Write
+ 478          //-----------------------------------------------------------------------------
+ 479          //
+ 480          // Return Value : None
+ 481          // Parameters   :
+ 482          //                                      1) BYTE addr : target address
+ 483          //                                      2) BYTE uNumBytes : number of bytes to unload
+ 484          //                                      3) BYTE * pData : location of source data
+ 485          //
+ 486          // Write to the selected endpoint FIFO
+ 487          //
+ 488          //-----------------------------------------------------------------------------
+ 489          void Fifo_Write(BYTE addr, BYTE uNumBytes, BYTE * pData)
+C51 COMPILER V9.50a   USB_ISR                                                              04/03/2023 15:54:11 PAGE 9   
+
+ 490          {
+ 491   1              // If >0 bytes requested,
+ 492   1              if (uNumBytes)
+ 493   1              {
+ 494   2                      while(USB0ADR & 0x80);                          // Wait for BUSY->'0'
+ 495   2                                                                                              // (register available)
+ 496   2                      USB0ADR = (addr);                                       // Set address (mask out bits7-6)
+ 497   2      
+ 498   2                      // Write <NumBytes> to the selected FIFO
+ 499   2                      do
+ 500   2                      {
+ 501   3      //                      USB0DAT = *pData++;                             // splitting it results shorter code size
+ 502   3                              USB0DAT = *pData;
+ 503   3                              pData++;
+ 504   3                              while(USB0ADR & 0x80);                  // Wait for BUSY->'0' (data ready)
+ 505   3                      } while ( --uNumBytes != 0 );
+ 506   2              }
+ 507   1      }
+ 508          
+ 509          //-----------------------------------------------------------------------------
+ 510          // POLL_READ_BYTE, POLL_WRITE_BYTE
+ 511          //-----------------------------------------------------------------------------
+ 512          // When the macros are not defined, provide them as functions
+ 513          //-----------------------------------------------------------------------------
+ 514          
+ 515          #if defined( POLL_READ_BYTE_DEF )
+              
+              BYTE POLL_READ_BYTE_FUNC( BYTE addr )
+              {
+                      while( USB0ADR & 0x80 );
+                      USB0ADR = (0x80 | addr);
+                      while( USB0ADR & 0x80 );
+                      return USB0DAT;
+              }
+              
+              #endif
+ 526          
+ 527          #if !defined( POLL_WRITE_BYTE )
+              
+              void POLL_WRITE_BYTE( BYTE addr, BYTE dt )
+              {
+                      while(USB0ADR & 0x80);
+                      USB0ADR = addr;
+                      USB0DAT = dt;
+              }
+              
+              #endif
+ 537          
+ 538          //-----------------------------------------------------------------------------
+ 539          // End Of File
+ 540          //-----------------------------------------------------------------------------
+C51 COMPILER V9.50a   USB_ISR                                                              04/03/2023 15:54:11 PAGE 10  
+
+ASSEMBLY LISTING OF GENERATED OBJECT CODE
+
+
+             ; FUNCTION Usb_ISR (BEGIN)
+0000 C0E0              PUSH    ACC
+0002 C0F0              PUSH    B
+0004 C083              PUSH    DPH
+0006 C082              PUSH    DPL
+0008 C0D0              PUSH    PSW
+000A 75D000            MOV     PSW,#00H
+000D C000              PUSH    AR0
+000F C001              PUSH    AR1
+0011 C002              PUSH    AR2
+0013 C003              PUSH    AR3
+0015 C004              PUSH    AR4
+0017 C005              PUSH    AR5
+0019 C006              PUSH    AR6
+001B C007              PUSH    AR7
+                                           ; SOURCE LINE # 84
+                                           ; SOURCE LINE # 86
+001D         ?C0001:
+                                           ; SOURCE LINE # 87
+001D E596              MOV     A,USB0ADR
+001F 20E7FB            JB      ACC.7,?C0001
+0022         ?C0002:
+0022 759686            MOV     USB0ADR,#086H
+0025         ?C0003:
+0025 E596              MOV     A,USB0ADR
+0027 20E7FB            JB      ACC.7,?C0003
+002A         ?C0004:
+002A 7800        R     MOV     R0,#LOW bCommon
+002C E597              MOV     A,USB0DAT
+002E F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 88
+002F         ?C0005:
+002F E596              MOV     A,USB0ADR
+0031 20E7FB            JB      ACC.7,?C0005
+0034         ?C0006:
+0034 759682            MOV     USB0ADR,#082H
+0037         ?C0007:
+0037 E596              MOV     A,USB0ADR
+0039 20E7FB            JB      ACC.7,?C0007
+003C         ?C0008:
+003C 7800        R     MOV     R0,#LOW bIn
+003E E597              MOV     A,USB0DAT
+0040 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 89
+0041         ?C0009:
+0041 E596              MOV     A,USB0ADR
+0043 20E7FB            JB      ACC.7,?C0009
+0046         ?C0010:
+0046 759684            MOV     USB0ADR,#084H
+0049         ?C0011:
+0049 E596              MOV     A,USB0ADR
+004B 20E7FB            JB      ACC.7,?C0011
+004E         ?C0012:
+004E 7800        R     MOV     R0,#LOW bOut
+0050 E597              MOV     A,USB0DAT
+0052 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 90
+                                           ; SOURCE LINE # 97
+0053 7800        R     MOV     R0,#LOW bCommon
+C51 COMPILER V9.50a   USB_ISR                                                              04/03/2023 15:54:11 PAGE 11  
+
+0055 E2                MOVX    A,@R0
+0056 30E203            JNB     ACC.2,?C0013
+                                           ; SOURCE LINE # 98
+                                           ; SOURCE LINE # 99
+0059 120000      R     LCALL   Usb_Reset
+                                           ; SOURCE LINE # 100
+005C         ?C0013:
+                                           ; SOURCE LINE # 101
+005C 7800        R     MOV     R0,#LOW bCommon
+005E E2                MOVX    A,@R0
+005F 30E306            JNB     ACC.3,?C0014
+                                           ; SOURCE LINE # 102
+                                           ; SOURCE LINE # 103
+0062 120000      R     LCALL   Handle_EP_HALT
+                                           ; SOURCE LINE # 104
+0065 120000      E     LCALL   Handle_In1
+                                           ; SOURCE LINE # 105
+0068         ?C0014:
+                                           ; SOURCE LINE # 106
+0068 7800        R     MOV     R0,#LOW bIn
+006A E2                MOVX    A,@R0
+006B 30E003            JNB     ACC.0,?C0015
+                                           ; SOURCE LINE # 107
+                                           ; SOURCE LINE # 108
+006E 120000      R     LCALL   Handle_Setup
+                                           ; SOURCE LINE # 109
+0071         ?C0015:
+                                           ; SOURCE LINE # 110
+0071 7800        R     MOV     R0,#LOW bCommon
+0073 E2                MOVX    A,@R0
+0074 30E003            JNB     ACC.0,?C0017
+                                           ; SOURCE LINE # 111
+                                           ; SOURCE LINE # 112
+0077 120000      R     LCALL   Usb_Suspend
+                                           ; SOURCE LINE # 113
+                                           ; SOURCE LINE # 114
+                                           ; SOURCE LINE # 115
+007A         ?C0017:
+007A D007              POP     AR7
+007C D006              POP     AR6
+007E D005              POP     AR5
+0080 D004              POP     AR4
+0082 D003              POP     AR3
+0084 D002              POP     AR2
+0086 D001              POP     AR1
+0088 D000              POP     AR0
+008A D0D0              POP     PSW
+008C D082              POP     DPL
+008E D083              POP     DPH
+0090 D0F0              POP     B
+0092 D0E0              POP     ACC
+0094 32                RETI    
+             ; FUNCTION Usb_ISR (END)
+
+             ; FUNCTION Usb_Reset (BEGIN)
+                                           ; SOURCE LINE # 140
+                                           ; SOURCE LINE # 141
+                                           ; SOURCE LINE # 142
+0000         ?C0018:
+0000 E596              MOV     A,USB0ADR
+0002 20E7FB            JB      ACC.7,?C0018
+0005         ?C0019:
+C51 COMPILER V9.50a   USB_ISR                                                              04/03/2023 15:54:11 PAGE 12  
+
+0005 759607            MOV     USB0ADR,#07H
+0008 759701            MOV     USB0DAT,#01H
+                                           ; SOURCE LINE # 143
+000B         ?C0020:
+000B E596              MOV     A,USB0ADR
+000D 20E7FB            JB      ACC.7,?C0020
+0010         ?C0021:
+0010 759609            MOV     USB0ADR,#09H
+0013 E4                CLR     A
+0014 F597              MOV     USB0DAT,A
+                                           ; SOURCE LINE # 144
+0016         ?C0022:
+0016 E596              MOV     A,USB0ADR
+0018 20E7FB            JB      ACC.7,?C0022
+001B         ?C0023:
+001B 75960B            MOV     USB0ADR,#0BH
+001E 75970D            MOV     USB0DAT,#0DH
+                                           ; SOURCE LINE # 146
+0021         ?C0024:
+0021 E596              MOV     A,USB0ADR
+0023 20E7FB            JB      ACC.7,?C0024
+0026         ?C0025:
+0026 759601            MOV     USB0ADR,#01H
+0029 759701            MOV     USB0DAT,#01H
+                                           ; SOURCE LINE # 149
+002C 7800        R     MOV     R0,#LOW USB_State
+002E 7402              MOV     A,#02H
+0030 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 151
+0031 E4                CLR     A
+0032 18                DEC     R0
+0033 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 152
+0034 D200        R     SETB    Ep_Status1
+                                           ; SOURCE LINE # 153
+0036 D200        R     SETB    Ep_StatusOUT2
+                                           ; SOURCE LINE # 154
+0038 D200        R     SETB    Ep_StatusIN2
+                                           ; SOURCE LINE # 155
+003A 22                RET     
+             ; FUNCTION Usb_Reset (END)
+
+             ; FUNCTION Handle_Setup (BEGIN)
+                                           ; SOURCE LINE # 169
+                                           ; SOURCE LINE # 170
+                                           ; SOURCE LINE # 171
+0000         ?C0027:
+                                           ; SOURCE LINE # 174
+0000 E596              MOV     A,USB0ADR
+0002 20E7FB            JB      ACC.7,?C0027
+0005         ?C0028:
+0005 75960E            MOV     USB0ADR,#0EH
+0008 E4                CLR     A
+0009 F597              MOV     USB0DAT,A
+                                           ; SOURCE LINE # 175
+000B         ?C0029:
+000B E596              MOV     A,USB0ADR
+000D 20E7FB            JB      ACC.7,?C0029
+0010         ?C0030:
+0010 759691            MOV     USB0ADR,#091H
+0013         ?C0031:
+0013 E596              MOV     A,USB0ADR
+C51 COMPILER V9.50a   USB_ISR                                                              04/03/2023 15:54:11 PAGE 13  
+
+0015 20E7FB            JB      ACC.7,?C0031
+0018         ?C0032:
+0018 7800        R     MOV     R0,#LOW ControlReg
+001A E597              MOV     A,USB0DAT
+001C F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 177
+001D E2                MOVX    A,@R0
+001E FF                MOV     R7,A
+001F 30E20F            JNB     ACC.2,?C0033
+                                           ; SOURCE LINE # 178
+                                           ; SOURCE LINE # 179
+0022         ?C0034:
+0022 E596              MOV     A,USB0ADR
+0024 20E7FB            JB      ACC.7,?C0034
+0027         ?C0035:
+0027 759611            MOV     USB0ADR,#011H
+002A E4                CLR     A
+002B F597              MOV     USB0DAT,A
+                                           ; SOURCE LINE # 180
+002D 7800        R     MOV     R0,#LOW Ep_Status0
+002F F2                MOVX    @R0,A
+0030 22                RET     
+                                           ; SOURCE LINE # 182
+0031         ?C0033:
+                                           ; SOURCE LINE # 184
+0031 EF                MOV     A,R7
+0032 30E40F            JNB     ACC.4,?C0037
+                                           ; SOURCE LINE # 185
+                                           ; SOURCE LINE # 186
+0035         ?C0038:
+0035 E596              MOV     A,USB0ADR
+0037 20E7FB            JB      ACC.7,?C0038
+003A         ?C0039:
+003A 759611            MOV     USB0ADR,#011H
+003D 759780            MOV     USB0DAT,#080H
+                                           ; SOURCE LINE # 187
+0040 E4                CLR     A
+0041 7800        R     MOV     R0,#LOW Ep_Status0
+0043 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 188
+0044         ?C0037:
+                                           ; SOURCE LINE # 190
+0044 7800        R     MOV     R0,#LOW Ep_Status0
+0046 E2                MOVX    A,@R0
+0047 6003              JZ      $ + 5H
+0049 020000      R     LJMP    ?C0040
+                                           ; SOURCE LINE # 191
+                                           ; SOURCE LINE # 192
+004C 7800        R     MOV     R0,#LOW ControlReg
+004E E2                MOVX    A,@R0
+004F 20E003            JB      ACC.0,$ + 6H
+0052 020000      R     LJMP    ?C0040
+                                           ; SOURCE LINE # 193
+                                           ; SOURCE LINE # 194
+0055 7BFE              MOV     R3,#0FEH
+0057 7A00        R     MOV     R2,#HIGH Setup
+0059 7900        R     MOV     R1,#LOW Setup
+005B 7D08              MOV     R5,#08H
+005D 7F20              MOV     R7,#020H
+005F 120000      R     LCALL   _Fifo_Read
+                                           ; SOURCE LINE # 198
+0062 7800        R     MOV     R0,#LOW Setup+03H
+C51 COMPILER V9.50a   USB_ISR                                                              04/03/2023 15:54:11 PAGE 14  
+
+0064 E2                MOVX    A,@R0
+0065 FE                MOV     R6,A
+0066 18                DEC     R0
+0067 E2                MOVX    A,@R0
+0068 FD                MOV     R5,A
+0069 EE                MOV     A,R6
+006A F2                MOVX    @R0,A
+006B ED                MOV     A,R5
+006C 08                INC     R0
+006D F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 199
+006E 7800        R     MOV     R0,#LOW Setup+05H
+0070 E2                MOVX    A,@R0
+0071 FE                MOV     R6,A
+0072 18                DEC     R0
+0073 E2                MOVX    A,@R0
+0074 FD                MOV     R5,A
+0075 EE                MOV     A,R6
+0076 F2                MOVX    @R0,A
+0077 ED                MOV     A,R5
+0078 08                INC     R0
+0079 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 200
+007A 7800        R     MOV     R0,#LOW Setup+07H
+007C E2                MOVX    A,@R0
+007D FE                MOV     R6,A
+007E 18                DEC     R0
+007F E2                MOVX    A,@R0
+0080 FD                MOV     R5,A
+0081 EE                MOV     A,R6
+0082 F2                MOVX    @R0,A
+0083 ED                MOV     A,R5
+0084 08                INC     R0
+0085 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 203
+0086 C200        R     CLR     setup_handled
+                                           ; SOURCE LINE # 204
+0088 7800        R     MOV     R0,#LOW Setup
+008A E2                MOVX    A,@R0
+008B 5460              ANL     A,#060H
+008D 24E0              ADD     A,#0E0H
+008F 600D              JZ      ?C0044
+0091 24E0              ADD     A,#0E0H
+0093 600E              JZ      ?C0045
+0095 2440              ADD     A,#040H
+0097 700D              JNZ     ?C0047
+                                           ; SOURCE LINE # 205
+                                           ; SOURCE LINE # 206
+0099         ?C0043:
+                                           ; SOURCE LINE # 207
+0099 120000      E     LCALL   Standard_Device_Request
+                                           ; SOURCE LINE # 208
+009C 8008              SJMP    ?C0047
+                                           ; SOURCE LINE # 209
+009E         ?C0044:
+                                           ; SOURCE LINE # 210
+009E 120000      E     LCALL   Class_Request
+                                           ; SOURCE LINE # 211
+00A1 8003              SJMP    ?C0047
+                                           ; SOURCE LINE # 212
+00A3         ?C0045:
+                                           ; SOURCE LINE # 213
+C51 COMPILER V9.50a   USB_ISR                                                              04/03/2023 15:54:11 PAGE 15  
+
+00A3 120000      E     LCALL   Vendor_Request
+                                           ; SOURCE LINE # 214
+                                           ; SOURCE LINE # 215
+                                           ; SOURCE LINE # 216
+                                           ; SOURCE LINE # 217
+                                           ; SOURCE LINE # 219
+00A6         ?C0047:
+00A6 E596              MOV     A,USB0ADR
+00A8 20E7FB            JB      ACC.7,?C0047
+00AB         ?C0048:
+00AB 75960E            MOV     USB0ADR,#0EH
+00AE E4                CLR     A
+00AF F597              MOV     USB0DAT,A
+                                           ; SOURCE LINE # 220
+00B1 30000D      R     JNB     setup_handled,?C0053
+                                           ; SOURCE LINE # 221
+                                           ; SOURCE LINE # 222
+00B4         ?C0050:
+00B4 E596              MOV     A,USB0ADR
+00B6 20E7FB            JB      ACC.7,?C0050
+00B9         ?C0051:
+00B9 759611            MOV     USB0ADR,#011H
+00BC 759740            MOV     USB0DAT,#040H
+                                           ; SOURCE LINE # 223
+00BF 8010              SJMP    ?C0052
+                                           ; SOURCE LINE # 225
+00C1         ?C0053:
+00C1 E596              MOV     A,USB0ADR
+00C3 20E7FB            JB      ACC.7,?C0053
+00C6         ?C0054:
+00C6 759611            MOV     USB0ADR,#011H
+00C9 759720            MOV     USB0DAT,#020H
+                                           ; SOURCE LINE # 226
+00CC 7800        R     MOV     R0,#LOW Ep_Status0
+00CE 7404              MOV     A,#04H
+00D0 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 227
+00D1         ?C0052:
+                                           ; SOURCE LINE # 229
+00D1 7800        R     MOV     R0,#LOW Setup+06H
+00D3 E2                MOVX    A,@R0
+00D4 FE                MOV     R6,A
+00D5 08                INC     R0
+00D6 E2                MOVX    A,@R0
+00D7 FF                MOV     R7,A
+00D8 7800        R     MOV     R0,#LOW DataSize+01H
+00DA E2                MOVX    A,@R0
+00DB B50708            CJNE    A,AR7,?C0055
+00DE 18                DEC     R0
+00DF E2                MOVX    A,@R0
+00E0 B50603            CJNE    A,AR6,?C0055
+00E3 D3                SETB    C
+00E4 8001              SJMP    ?C0056
+00E6         ?C0055:
+00E6 C3                CLR     C
+00E7         ?C0056:
+00E7 9200        R     MOV     send_eq_requested,C
+                                           ; SOURCE LINE # 231
+                                           ; SOURCE LINE # 232
+00E9         ?C0040:
+                                           ; SOURCE LINE # 234
+00E9 7800        R     MOV     R0,#LOW Ep_Status0
+C51 COMPILER V9.50a   USB_ISR                                                              04/03/2023 15:54:11 PAGE 16  
+
+00EB E2                MOVX    A,@R0
+00EC 6402              XRL     A,#02H
+00EE 6003              JZ      $ + 5H
+00F0 020000      R     LJMP    ?C0057
+                                           ; SOURCE LINE # 235
+                                           ; SOURCE LINE # 236
+00F3 7800        R     MOV     R0,#LOW ControlReg
+00F5 E2                MOVX    A,@R0
+00F6 30E103            JNB     ACC.1,$ + 6H
+00F9 020000      R     LJMP    ?C0057
+                                           ; SOURCE LINE # 237
+                                           ; SOURCE LINE # 238
+00FC         ?C0059:
+00FC E596              MOV     A,USB0ADR
+00FE 20E7FB            JB      ACC.7,?C0059
+0101         ?C0060:
+0101 759691            MOV     USB0ADR,#091H
+0104         ?C0061:
+0104 E596              MOV     A,USB0ADR
+0106 20E7FB            JB      ACC.7,?C0061
+0109         ?C0062:
+0109 7800        R     MOV     R0,#LOW ControlReg
+010B E597              MOV     A,USB0DAT
+010D F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 241
+010E E2                MOVX    A,@R0
+010F 30E403            JNB     ACC.4,?C0064
+0112 20E06F            JB      ACC.0,?C0057
+0115         ?C0064:
+                                           ; SOURCE LINE # 244
+                                           ; SOURCE LINE # 245
+0115 7800        R     MOV     R0,#LOW TempReg
+0117 7402              MOV     A,#02H
+0119 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 247
+011A C3                CLR     C
+011B 7800        R     MOV     R0,#LOW DataSize+01H
+011D E2                MOVX    A,@R0
+011E 9440              SUBB    A,#040H
+0120 18                DEC     R0
+0121 E2                MOVX    A,@R0
+0122 9400              SUBB    A,#00H
+0124 4034              JC      ?C0065
+                                           ; SOURCE LINE # 248
+                                           ; SOURCE LINE # 250
+0126 7800        R     MOV     R0,#LOW DataPtr
+0128 E2                MOVX    A,@R0
+0129 FB                MOV     R3,A
+012A 08                INC     R0
+012B E2                MOVX    A,@R0
+012C FA                MOV     R2,A
+012D 08                INC     R0
+012E E2                MOVX    A,@R0
+012F F9                MOV     R1,A
+0130 7D40              MOV     R5,#040H
+0132 7F20              MOV     R7,#020H
+0134 120000      R     LCALL   _Fifo_Write
+                                           ; SOURCE LINE # 251
+0137 7800        R     MOV     R0,#LOW DataPtr+02H
+0139 E2                MOVX    A,@R0
+013A 2440              ADD     A,#040H
+013C F2                MOVX    @R0,A
+C51 COMPILER V9.50a   USB_ISR                                                              04/03/2023 15:54:11 PAGE 17  
+
+013D 18                DEC     R0
+013E E2                MOVX    A,@R0
+013F 3400              ADDC    A,#00H
+0141 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 252
+0142 7800        R     MOV     R0,#LOW DataSize+01H
+0144 E2                MOVX    A,@R0
+0145 24C0              ADD     A,#0C0H
+0147 F2                MOVX    @R0,A
+0148 18                DEC     R0
+0149 E2                MOVX    A,@R0
+014A 34FF              ADDC    A,#0FFH
+014C F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 253
+014D 300027      R     JNB     send_eq_requested,?C0068
+0150 08                INC     R0
+0151 E2                MOVX    A,@R0
+0152 7002              JNZ     ?C0147
+0154 18                DEC     R0
+0155 E2                MOVX    A,@R0
+0156         ?C0147:
+0156 701F              JNZ     ?C0068
+                                           ; SOURCE LINE # 254
+                                           ; SOURCE LINE # 255
+                                           ; SOURCE LINE # 256
+                                           ; SOURCE LINE # 257
+                                           ; SOURCE LINE # 258
+0158 8013              SJMP    ?C0148
+015A         ?C0065:
+                                           ; SOURCE LINE # 260
+015A 7800        R     MOV     R0,#LOW DataSize
+015C 08                INC     R0
+015D E2                MOVX    A,@R0
+015E FD                MOV     R5,A
+015F 08                INC     R0
+0160 E2                MOVX    A,@R0
+0161 FB                MOV     R3,A
+0162 08                INC     R0
+0163 E2                MOVX    A,@R0
+0164 FA                MOV     R2,A
+0165 08                INC     R0
+0166 E2                MOVX    A,@R0
+0167 F9                MOV     R1,A
+0168 7F20              MOV     R7,#020H
+016A 120000      R     LCALL   _Fifo_Write
+                                           ; SOURCE LINE # 261
+016D         ?C0148:
+016D 7800        R     MOV     R0,#LOW TempReg
+016F E2                MOVX    A,@R0
+0170 4408              ORL     A,#08H
+0172 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 262
+0173 E4                CLR     A
+0174 7800        R     MOV     R0,#LOW Ep_Status0
+0176 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 263
+                                           ; SOURCE LINE # 264
+0177         ?C0068:
+0177 E596              MOV     A,USB0ADR
+0179 20E7FB            JB      ACC.7,?C0068
+017C         ?C0069:
+017C 759611            MOV     USB0ADR,#011H
+C51 COMPILER V9.50a   USB_ISR                                                              04/03/2023 15:54:11 PAGE 18  
+
+017F 7800        R     MOV     R0,#LOW TempReg
+0181 E2                MOVX    A,@R0
+0182 F597              MOV     USB0DAT,A
+                                           ; SOURCE LINE # 265
+                                           ; SOURCE LINE # 266
+                                           ; SOURCE LINE # 267
+0184         ?C0057:
+                                           ; SOURCE LINE # 269
+0184 7800        R     MOV     R0,#LOW Ep_Status0
+0186 E2                MOVX    A,@R0
+0187 6403              XRL     A,#03H
+0189 6003              JZ      $ + 5H
+018B 020000      R     LJMP    ?C0036
+                                           ; SOURCE LINE # 270
+                                           ; SOURCE LINE # 271
+018E         ?C0071:
+018E E596              MOV     A,USB0ADR
+0190 20E7FB            JB      ACC.7,?C0071
+0193         ?C0072:
+0193 759691            MOV     USB0ADR,#091H
+0196         ?C0073:
+0196 E596              MOV     A,USB0ADR
+0198 20E7FB            JB      ACC.7,?C0073
+019B         ?C0074:
+019B 7800        R     MOV     R0,#LOW ControlReg
+019D E597              MOV     A,USB0DAT
+019F F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 272
+01A0 E2                MOVX    A,@R0
+01A1 30E079            JNB     ACC.0,?C0036
+                                           ; SOURCE LINE # 273
+                                           ; SOURCE LINE # 274
+01A4 7440              MOV     A,#040H
+01A6 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 276
+01A7         ?C0076:
+01A7 E596              MOV     A,USB0ADR
+01A9 20E7FB            JB      ACC.7,?C0076
+01AC         ?C0077:
+01AC 759696            MOV     USB0ADR,#096H
+01AF         ?C0078:
+01AF E596              MOV     A,USB0ADR
+01B1 20E7FB            JB      ACC.7,?C0078
+01B4         ?C0079:
+01B4 7800        R     MOV     R0,#LOW dataCount
+01B6 E597              MOV     A,USB0DAT
+01B8 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 277
+01B9 E2                MOVX    A,@R0
+01BA FD                MOV     R5,A
+01BB 7800        R     MOV     R0,#LOW DataPtr
+01BD E2                MOVX    A,@R0
+01BE FB                MOV     R3,A
+01BF 08                INC     R0
+01C0 E2                MOVX    A,@R0
+01C1 FA                MOV     R2,A
+01C2 08                INC     R0
+01C3 E2                MOVX    A,@R0
+01C4 F9                MOV     R1,A
+01C5 7F20              MOV     R7,#020H
+01C7 120000      R     LCALL   _Fifo_Read
+                                           ; SOURCE LINE # 281
+C51 COMPILER V9.50a   USB_ISR                                                              04/03/2023 15:54:11 PAGE 19  
+
+01CA 7800        R     MOV     R0,#LOW dataCount
+01CC E2                MOVX    A,@R0
+01CD F9                MOV     R1,A
+01CE FF                MOV     R7,A
+01CF 7E00              MOV     R6,#00H
+01D1 7800        R     MOV     R0,#LOW DataPtr+02H
+01D3 E2                MOVX    A,@R0
+01D4 2F                ADD     A,R7
+01D5 F2                MOVX    @R0,A
+01D6 18                DEC     R0
+01D7 E2                MOVX    A,@R0
+01D8 3E                ADDC    A,R6
+01D9 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 282
+01DA 7800        R     MOV     R0,#LOW DataSize
+01DC E2                MOVX    A,@R0
+01DD FC                MOV     R4,A
+01DE 08                INC     R0
+01DF E2                MOVX    A,@R0
+01E0 FD                MOV     R5,A
+01E1 D3                SETB    C
+01E2 9F                SUBB    A,R7
+01E3 EC                MOV     A,R4
+01E4 9E                SUBB    A,R6
+01E5 400B              JC      ?C0080
+                                           ; SOURCE LINE # 283
+01E7 E9                MOV     A,R1
+01E8 FF                MOV     R7,A
+01E9 ED                MOV     A,R5
+01EA 9F                SUBB    A,R7
+01EB F2                MOVX    @R0,A
+01EC EC                MOV     A,R4
+01ED 9E                SUBB    A,R6
+01EE 18                DEC     R0
+01EF F2                MOVX    @R0,A
+01F0 801E              SJMP    ?C0083
+01F2         ?C0080:
+                                           ; SOURCE LINE # 284
+                                           ; SOURCE LINE # 285
+01F2 E4                CLR     A
+01F3 7800        R     MOV     R0,#LOW DataSize
+01F5 F2                MOVX    @R0,A
+01F6 08                INC     R0
+01F7 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 286
+01F8 7800        R     MOV     R0,#LOW ControlReg
+01FA E2                MOVX    A,@R0
+01FB 4408              ORL     A,#08H
+01FD F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 287
+01FE E4                CLR     A
+01FF 7800        R     MOV     R0,#LOW Ep_Status0
+0201 F2                MOVX    @R0,A
+                                           ; SOURCE LINE # 289
+0202 7800        R     MOV     R0,#LOW Setup+01H
+0204 E2                MOVX    A,@R0
+0205 B42008            CJNE    A,#020H,?C0083
+0208 18                DEC     R0
+0209 E2                MOVX    A,@R0
+020A B42103            CJNE    A,#021H,?C0083
+                                           ; SOURCE LINE # 291
+020D 120000      E     LCALL   CS_Set_Line_Coding_Complete
+C51 COMPILER V9.50a   USB_ISR                                                              04/03/2023 15:54:11 PAGE 20  
+
+                                           ; SOURCE LINE # 292
+                                           ; SOURCE LINE # 294
+0210         ?C0083:
+0210 E596              MOV     A,USB0ADR
+0212 20E7FB            JB      ACC.7,?C0083
+0215         ?C0084:
+0215 759611            MOV     USB0ADR,#011H
+0218 7800        R     MOV     R0,#LOW ControlReg
+021A E2                MOVX    A,@R0
+021B F597              MOV     USB0DAT,A
+                                           ; SOURCE LINE # 295
+                                           ; SOURCE LINE # 296
+                                           ; SOURCE LINE # 298
+021D         ?C0036:
+021D 22                RET     
+             ; FUNCTION Handle_Setup (END)
+
+             ; FUNCTION Usb_Suspend (BEGIN)
+                                           ; SOURCE LINE # 311
+                                           ; SOURCE LINE # 312
+                                           ; SOURCE LINE # 314
+0000 E4                CLR     A
+0001 F5F1              MOV     P0MDIN,A
+                                           ; SOURCE LINE # 315
+0003 F5F2              MOV     P1MDIN,A
+                                           ; SOURCE LINE # 316
+0005 F5F3              MOV     P2MDIN,A
+                                           ; SOURCE LINE # 317
+0007 F5F4              MOV     P3MDIN,A
+                                           ; SOURCE LINE # 322
+0009 43B220            ORL     OSCICN,#020H
+                                           ; SOURCE LINE # 336
+000C 75F1FF            MOV     P0MDIN,#0FFH
+                                           ; SOURCE LINE # 337
+000F 75F2FF            MOV     P1MDIN,#0FFH
+                                           ; SOURCE LINE # 338
+0012 75F3DF            MOV     P2MDIN,#0DFH
+                                           ; SOURCE LINE # 339
+0015 75F4FF            MOV     P3MDIN,#0FFH
+                                           ; SOURCE LINE # 346
+0018 22                RET     
+             ; FUNCTION Usb_Suspend (END)
+
+             ; FUNCTION Handle_EP_HALT (BEGIN)
+                                           ; SOURCE LINE # 380
+                                           ; SOURCE LINE # 381
+                                           ; SOURCE LINE # 382
+0000         ?C0086:
+                                           ; SOURCE LINE # 385
+0000 E596              MOV     A,USB0ADR
+0002 20E7FB            JB      ACC.7,?C0086
+0005         ?C0087:
+0005 75960E            MOV     USB0ADR,#0EH
+0008 759701            MOV     USB0DAT,#01H
+                                           ; SOURCE LINE # 386
+000B         ?C0088:
+000B E596              MOV     A,USB0ADR
+000D 20E7FB            JB      ACC.7,?C0088
+0010         ?C0089:
+0010 759691            MOV     USB0ADR,#091H
+0013         ?C0090:
+0013 E596              MOV     A,USB0ADR
+C51 COMPILER V9.50a   USB_ISR                                                              04/03/2023 15:54:11 PAGE 21  
+
+0015 20E7FB            JB      ACC.7,?C0090
+0018         ?C0091:
+;---- Variable 'ControlReg' assigned to Register 'R7' ----
+0018 AF97              MOV     R7,USB0DAT
+                                           ; SOURCE LINE # 387
+001A 30000D      R     JNB     Ep_Status1,?C0092
+                                           ; SOURCE LINE # 388
+                                           ; SOURCE LINE # 389
+001D         ?C0093:
+001D E596              MOV     A,USB0ADR
+001F 20E7FB            JB      ACC.7,?C0093
+0022         ?C0094:
+0022 759611            MOV     USB0ADR,#011H
+0025 759710            MOV     USB0DAT,#010H
+                                           ; SOURCE LINE # 390
+0028 800F              SJMP    ?C0099
+002A         ?C0092:
+                                           ; SOURCE LINE # 392
+                                           ; SOURCE LINE # 393
+002A EF                MOV     A,R7
+002B 30E50B            JNB     ACC.5,?C0099
+                                           ; SOURCE LINE # 394
+                                           ; SOURCE LINE # 395
+002E         ?C0097:
+002E E596              MOV     A,USB0ADR
+0030 20E7FB            JB      ACC.7,?C0097
+0033         ?C0098:
+0033 759611            MOV     USB0ADR,#011H
+0036 E4                CLR     A
+0037 F597              MOV     USB0DAT,A
+                                           ; SOURCE LINE # 396
+                                           ; SOURCE LINE # 397
+                                           ; SOURCE LINE # 400
+0039         ?C0099:
+0039 E596              MOV     A,USB0ADR
+003B 20E7FB            JB      ACC.7,?C0099
+003E         ?C0100:
+003E 75960E            MOV     USB0ADR,#0EH
+0041 759702            MOV     USB0DAT,#02H
+                                           ; SOURCE LINE # 401
+0044         ?C0101:
+0044 E596              MOV     A,USB0ADR
+0046 20E7FB            JB      ACC.7,?C0101
+0049         ?C0102:
+0049 759691            MOV     USB0ADR,#091H
+004C         ?C0103:
+004C E596              MOV     A,USB0ADR
+004E 20E7FB            JB      ACC.7,?C0103
+0051         ?C0104:
+0051 AF97              MOV     R7,USB0DAT
+                                           ; SOURCE LINE # 402
+0053 30000D      R     JNB     Ep_StatusIN2,?C0105
+                                           ; SOURCE LINE # 403
+                                           ; SOURCE LINE # 404
+0056         ?C0106:
+0056 E596              MOV     A,USB0ADR
+0058 20E7FB            JB      ACC.7,?C0106
+005B         ?C0107:
+005B 759611            MOV     USB0ADR,#011H
+005E 759710            MOV     USB0DAT,#010H
+                                           ; SOURCE LINE # 405
+0061 800F              SJMP    ?C0112
+C51 COMPILER V9.50a   USB_ISR                                                              04/03/2023 15:54:11 PAGE 22  
+
+0063         ?C0105:
+                                           ; SOURCE LINE # 407
+                                           ; SOURCE LINE # 408
+0063 EF                MOV     A,R7
+0064 30E50B            JNB     ACC.5,?C0112
+                                           ; SOURCE LINE # 409
+                                           ; SOURCE LINE # 410
+0067         ?C0110:
+0067 E596              MOV     A,USB0ADR
+0069 20E7FB            JB      ACC.7,?C0110
+006C         ?C0111:
+006C 759611            MOV     USB0ADR,#011H
+006F E4                CLR     A
+0070 F597              MOV     USB0DAT,A
+                                           ; SOURCE LINE # 411
+                                           ; SOURCE LINE # 412
+                                           ; SOURCE LINE # 415
+0072         ?C0112:
+0072 E596              MOV     A,USB0ADR
+0074 20E7FB            JB      ACC.7,?C0112
+0077         ?C0113:
+0077 759694            MOV     USB0ADR,#094H
+007A         ?C0114:
+007A E596              MOV     A,USB0ADR
+007C 20E7FB            JB      ACC.7,?C0114
+007F         ?C0115:
+007F AF97              MOV     R7,USB0DAT
+                                           ; SOURCE LINE # 416
+0081 30000C      R     JNB     Ep_StatusOUT2,?C0116
+                                           ; SOURCE LINE # 417
+                                           ; SOURCE LINE # 418
+0084         ?C0117:
+0084 E596              MOV     A,USB0ADR
+0086 20E7FB            JB      ACC.7,?C0117
+0089         ?C0118:
+0089 759614            MOV     USB0ADR,#014H
+008C 759721            MOV     USB0DAT,#021H
+                                           ; SOURCE LINE # 419
+008F 22                RET     
+0090         ?C0116:
+                                           ; SOURCE LINE # 421
+                                           ; SOURCE LINE # 422
+0090 EF                MOV     A,R7
+0091 30E60B            JNB     ACC.6,?C0123
+                                           ; SOURCE LINE # 423
+                                           ; SOURCE LINE # 424
+0094         ?C0121:
+0094 E596              MOV     A,USB0ADR
+0096 20E7FB            JB      ACC.7,?C0121
+0099         ?C0122:
+0099 759614            MOV     USB0ADR,#014H
+009C 759701            MOV     USB0DAT,#01H
+                                           ; SOURCE LINE # 425
+                                           ; SOURCE LINE # 426
+                                           ; SOURCE LINE # 427
+009F         ?C0123:
+009F 22                RET     
+             ; FUNCTION Handle_EP_HALT (END)
+
+             ; FUNCTION _Fifo_Read (BEGIN)
+                                           ; SOURCE LINE # 443
+;---- Variable 'addr' assigned to Register 'R7' ----
+C51 COMPILER V9.50a   USB_ISR                                                              04/03/2023 15:54:11 PAGE 23  
+
+;---- Variable 'pData' assigned to Register 'R1/R2/R3' ----
+;---- Variable 'uNumBytes' assigned to Register 'R5' ----
+                                           ; SOURCE LINE # 444
+                                           ; SOURCE LINE # 445
+0000 ED                MOV     A,R5
+0001 6033              JZ      ?C0128
+                                           ; SOURCE LINE # 446
+                                           ; SOURCE LINE # 447
+0003 DD0C              DJNZ    R5,?C0125
+                                           ; SOURCE LINE # 448
+                                           ; SOURCE LINE # 449
+0005 EF                MOV     A,R7
+0006 4480              ORL     A,#080H
+0008 F596              MOV     USB0ADR,A
+000A         ?C0126:
+                                           ; SOURCE LINE # 450
+000A E596              MOV     A,USB0ADR
+000C 20E7FB            JB      ACC.7,?C0126
+000F         ?C0127:
+                                           ; SOURCE LINE # 451
+000F 8020              SJMP    ?C0149
+                                           ; SOURCE LINE # 453
+0011         ?C0125:
+                                           ; SOURCE LINE # 455
+                                           ; SOURCE LINE # 456
+0011 EF                MOV     A,R7
+0012 44C0              ORL     A,#0C0H
+0014 F596              MOV     USB0ADR,A
+                                           ; SOURCE LINE # 462
+0016         ?C0133:
+                                           ; SOURCE LINE # 463
+0016 E596              MOV     A,USB0ADR
+0018 20E7FB            JB      ACC.7,?C0133
+001B         ?C0134:
+                                           ; SOURCE LINE # 465
+001B E597              MOV     A,USB0DAT
+001D 120000      E     LCALL   ?C?CSTPTR
+                                           ; SOURCE LINE # 466
+0020 7401              MOV     A,#01H
+0022 29                ADD     A,R1
+0023 F9                MOV     R1,A
+0024 E4                CLR     A
+0025 3A                ADDC    A,R2
+0026 FA                MOV     R2,A
+                                           ; SOURCE LINE # 467
+0027 DDED              DJNZ    R5,?C0133
+0029         ?C0135:
+                                           ; SOURCE LINE # 469
+0029 E596              MOV     A,USB0ADR
+002B 20E7FB            JB      ACC.7,?C0135
+002E         ?C0136:
+                                           ; SOURCE LINE # 470
+002E E4                CLR     A
+002F F596              MOV     USB0ADR,A
+                                           ; SOURCE LINE # 471
+0031         ?C0149:
+0031 E597              MOV     A,USB0DAT
+0033 120000      E     LCALL   ?C?CSTPTR
+                                           ; SOURCE LINE # 472
+                                           ; SOURCE LINE # 473
+                                           ; SOURCE LINE # 474
+0036         ?C0128:
+C51 COMPILER V9.50a   USB_ISR                                                              04/03/2023 15:54:11 PAGE 24  
+
+0036 22                RET     
+             ; FUNCTION _Fifo_Read (END)
+
+             ; FUNCTION _Fifo_Write (BEGIN)
+                                           ; SOURCE LINE # 489
+;---- Variable 'addr' assigned to Register 'R7' ----
+;---- Variable 'pData' assigned to Register 'R1/R2/R3' ----
+;---- Variable 'uNumBytes' assigned to Register 'R5' ----
+                                           ; SOURCE LINE # 490
+                                           ; SOURCE LINE # 492
+0000 ED                MOV     A,R5
+0001 601A              JZ      ?C0145
+                                           ; SOURCE LINE # 493
+0003         ?C0138:
+                                           ; SOURCE LINE # 494
+0003 E596              MOV     A,USB0ADR
+0005 20E7FB            JB      ACC.7,?C0138
+0008         ?C0139:
+                                           ; SOURCE LINE # 496
+0008 8F96              MOV     USB0ADR,R7
+000A         ?C0142:
+                                           ; SOURCE LINE # 500
+                                           ; SOURCE LINE # 502
+000A 120000      E     LCALL   ?C?CLDPTR
+000D F597              MOV     USB0DAT,A
+                                           ; SOURCE LINE # 503
+000F 7401              MOV     A,#01H
+0011 29                ADD     A,R1
+0012 F9                MOV     R1,A
+0013 E4                CLR     A
+0014 3A                ADDC    A,R2
+0015 FA                MOV     R2,A
+0016         ?C0143:
+                                           ; SOURCE LINE # 504
+0016 E596              MOV     A,USB0ADR
+0018 20E7FB            JB      ACC.7,?C0143
+001B         ?C0144:
+                                           ; SOURCE LINE # 505
+001B         ?C0140:
+001B DDED              DJNZ    R5,?C0142
+                                           ; SOURCE LINE # 506
+                                           ; SOURCE LINE # 507
+001D         ?C0145:
+001D 22                RET     
+             ; FUNCTION _Fifo_Write (END)
+
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =   1020    ----
+   CONSTANT SIZE    =   ----    ----
+   XDATA SIZE       =   ----    ----
+   PDATA SIZE       =     15       6
+   DATA SIZE        =   ----    ----
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =      5    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

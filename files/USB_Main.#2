@@ -1,0 +1,462 @@
+//-----------------------------------------------------------------------------
+// USB_Main.c
+//-----------------------------------------------------------------------------
+// Copyright 2005 Silicon Laboratories, Inc.
+// http://www.silabs.com
+//
+// Program Description:
+//
+// This application note covers the implementation of a simple USB application 
+// using the interrupt transfer type. This includes support for device
+// enumeration, control and interrupt transactions, and definitions of 
+// descriptor data. The purpose of this software is to give a simple working 
+// example of an interrupt transfer application; it does not include
+// support for multiple configurations or other transfer types.
+//
+// How To Test:		See Readme.txt
+//
+//
+// FID:				32X000024
+// Target:			C8051F32x
+// Tool chain:		Keil C51 7.50 / Keil EVAL C51
+//					Silicon Laboratories IDE version 2.6
+// Command Line:	 See Readme.txt
+// Project Name:	 F32x_USB_Interrupt
+//
+//
+// Release 1.3
+//		-All changes by GP
+//		-22 NOV 2005
+//		-Changed revision number to match project revision
+//		No content changes to this file
+//		-Modified file to fit new formatting guidelines
+//		-Changed file name from USB_MAIN.c
+
+// Release 1.1
+//		-All changes by DM
+//		-22 NOV 2002
+//		-Added support for switches and sample USB interrupt application.
+//
+// Release 1.0
+//		-Initial Revision (JS)
+//		-22 FEB 2002
+//
+
+//-----------------------------------------------------------------------------
+// Includes
+//-----------------------------------------------------------------------------
+
+#include <stdio.h>
+#include <intrins.h>
+#include "USB_CDC_Type.h"
+#include "USB_Register.h"
+#include "USB_Main.h"
+#include "USB_Descriptor.h"
+#include "USB_Standard_Requests.h"
+#include "USB_CDC_UART.h"
+#include "uart.h"
+#include "extsram.h"
+#include "spi.h"
+
+
+//-----------------------------------------------------------------------------
+// 16-bit SFR Definitions for 'F32x
+//-----------------------------------------------------------------------------
+
+#if defined KEIL
+
+
+#endif // KEIL
+
+//-----------------------------------------------------------------------------
+// Globals
+//-----------------------------------------------------------------------------
+
+xdata unsigned char buf [10];
+unsigned char timer = 0;
+int timeout = 300; // ms
+
+//-----------------------------------------------------------------------------
+// Local Prototypes
+//-----------------------------------------------------------------------------
+
+// Initialization Routines
+void Sysclk_Init(void);					// Initialize the system clock
+void Port_Init(void);					// Configure ports
+void Usb0_Init(void);					// Configure USB for Full speed
+void Timer_Init(void);					// Timer 2 for use by ADC and swtiches
+void Adc_Init(void);					// Configure ADC for continuous
+										// conversion low-power mode
+
+// Other Routines
+void Delay(void);						// About 80 us/1 ms on Full Speed
+
+//-----------------------------------------------------------------------------
+// _getkey
+//-----------------------------------------------------------------------------
+//
+// SFR Paged version of _getkey
+//
+char _getkey (void)  {
+
+   char c = '0';
+   do
+   { 		
+   		Handle_In2();					// Poll IN/OUT EP2 and handle transaction
+		Handle_Out2();
+	} while(!RXReady||!TXReady);
+   c = COMGetByte();
+   return c;
+}
+//-----------------------------------------------------------------------------
+// putchar
+//-----------------------------------------------------------------------------
+//
+// SFR Paged version of putchar
+//
+char putchar (char c)  {
+
+   // output CR  
+   if (c == '\n')  {
+      while (TXReady);
+      COMPutByte(0x0d);
+   }
+   
+   // output character
+   while (TXReady);
+   COMPutByte(c);   
+   
+   return (c);
+}
+
+void showhelp(void)
+{
+	printf("HELP\n");
+}
+
+int checkbit(const int value, const int position) {
+    int result;
+    if ((value & (1 << position)) == 0) {
+        result = 0;
+    } else {
+        result = 1;
+    }
+    return result;
+}
+
+void Make_volkov_package(unsigned char nch, unsigned char adr, int N)
+{
+	unsigned char xSum = (unsigned char) 0;
+	int i = 0;
+	extmas[N_UART] = nch;
+	extmas[NUM_SEND] = N+4;
+	extmas[TYPE_COM] = 1;
+	extmas[OUT_PACKAGE] = 0xAA; // SendStart
+	extmas[OUT_PACKAGE + 1] = adr;  // Send Adress of Device
+	xSum = adr;
+	for (i = 0; i<N; i++)
+	{
+		if (buf[i]!=0xAA & buf[i]!=0xAB & buf[i]!=0xAC)
+		{
+			extmas[OUT_PACKAGE + 2 + i] = buf[i]; //Send Package if it's not START STOP or SHIFT
+		} else
+		{
+			extmas[OUT_PACKAGE + 2 + i] = 0xAC;
+			extmas[OUT_PACKAGE + 2 + i] = buf[i] - 0xAC;
+		}
+		xSum = xSum^buf[i];
+	}
+	extmas[OUT_PACKAGE + 2 + N] = xSum;
+	extmas[OUT_PACKAGE + 2 + N + 1] = 0xAB;
+}
+
+//-----------------------------------------------------------------------------
+// Main Routine
+//-----------------------------------------------------------------------------
+void main(void)
+{
+//	BYTE Count;
+	BYTE dt;
+	int num;
+	long Nstep;
+	BYTE line_state;
+	BYTE abd = 0xFF;
+	int i = 0, t;
+
+#if defined KEIL
+
+	PCA0MD &= ~0x40;					// Disable Watchdog timer temporarily
+
+#endif // KEIL
+
+	Sysclk_Init();						// Initialize oscillator
+	Port_Init();						// Initialize crossbar and GPIO
+	init_exram();
+	Usb0_Init();						// Initialize USB0
+	Timer_Init();						// Initialize timer2
+	UART0_Init(BAUDRATE);				// Initialize UART0
+	UART1_Init(BAUDRATE);				// Initialize UART1
+	INT0_Init();
+	SPI_Init();
+	Flush_COMbuffers();					// Initialize COM ring buffer
+
+//	EIE1	|= 0x0A;					// Enable conversion complete interrupt and US0
+	EIE1	|= 0x02;					// Enable USB0 interrupt
+	IE		|= 0xA0;					// Enable Timer2 and Global Interrupt enable
+
+	printf("Test RS-485\n");
+	while (1)
+	{
+		if (i_flag) 
+		{
+			printf("Interrupt\n\r");
+			i_flag = 0;
+		}
+		if (end_int == 1)
+		{
+			SPI_MasterSend(0x00, 0x00);
+			printf("Interrupt was proccesed\n\r");
+			end_int = 0;
+			//IE0 = 1;
+		}
+		Handle_In2();					// Poll IN/OUT EP2 and handle transaction
+		Handle_Out2();
+		while (TXReady && RXReady)		// loop back TX to RX
+		{
+			dt = COMGetByte();
+			printf("%c\n", dt);
+			switch(dt)
+			{
+				case '1': 	num =  SPI_MasterSend(0x5A, 0xAA);
+							printf("%04x \n", num);
+						 	break;
+				case '2':   num =  SPI_MasterSend(0x00, 0x00);
+							printf("%04x \n", num);
+						 	break;
+				case '3': 	printf("0x%04x;\n\r",(int) extmas[IN_PACKAGE+5]);
+							printf("0x%04x;\n\r",(int) extmas[IN_PACKAGE+6]);
+							printf("0x%04x;\n\r",(int) extmas[IN_PACKAGE+7]);
+							printf("0x%04x;\n\r",(int) extmas[IN_PACKAGE+8]);
+							printf("0x%04x;\n\r",(int) extmas[IN_PACKAGE+9]);
+							break;
+				case '4': 	printf("end_int = %d;\n", end_int);
+							break;
+				case '5': 	extmas[0] = (1<<7);
+							extmas[0] |= 3;
+							extmas[1] = 3;
+							extmas[2] = 0x01;
+							extmas[3] = 0x02;
+							extmas[4] = 0x03;
+							extmas[5] = 0x04;
+							extmas[6] = 0x05;
+							extmas[7] = 0x06;
+						  	break;
+				case '6':	IE0 = 1;
+							printf("inside interrupt=%d\n", (int) inside_interrupt);
+							break;
+				case '7':	for(t=4;t<256;t++) extmas[t]=t;
+							printf("0x%04x ? 0x%04x;\n\r", (int) extmas[0], (int) extmas[128]);
+							printf("0x%04x ? 0x%04x;\n\r", (int) extmas[1], (int) extmas[129]);
+							printf("0x%04x ? 0x%04x;\n\r", (int) extmas[2], (int) extmas[130]);
+							break;
+				case '8':	printf("0x%04x;\n\r",(int) extmas[IN_PACKAGE]);
+							printf("0x%04x;\n\r",(int) extmas[IN_PACKAGE+1]);
+							printf("0x%04x;\n\r",(int) extmas[IN_PACKAGE+2]);
+							printf("0x%04x;\n\r",(int) extmas[IN_PACKAGE+3]);
+							printf("0x%04x;\n\r",(int) extmas[IN_PACKAGE+4]);
+							break;
+				case '9':	printf("0x%04x;\n\r",(int) extmas[0]);
+							printf("0x%04x;\n\r",(int) extmas[0+1]);
+							printf("0x%04x;\n\r",(int) extmas[0+2]);
+							printf("0x%04x;\n\r",(int) extmas[0+3]);
+							printf("0x%04x;\n\r",(int) extmas[0+4]);
+							break;
+				case 'q':	printf("0x%04x;\n\r",(int) extmas[0+5]);
+							printf("0x%04x;\n\r",(int) extmas[0+6]);
+							printf("0x%04x;\n\r",(int) extmas[0+7]);
+							printf("0x%04x;\n\r",(int) extmas[0+8]);
+							printf("0x%04x;\n\r",(int) extmas[0+9]);
+							break;
+				case 'Q':	UART1_Init(9600);
+							TIMEOUT_WAIT = 10; // in 10*ms
+							TIMEOUT_BYTE = 11; // in 100*mks
+							break;
+				case 'W':	extmas[1] = 1;
+							extmas[2] = 8;
+							extmas[0] = 1;
+							extmas[OUT_PACKAGE] = 0x00;
+							extmas[OUT_PACKAGE+1] = 0xAA;
+							extmas[OUT_PACKAGE+2] = 'W';
+							extmas[OUT_PACKAGE+3] = 'S';
+							extmas[OUT_PACKAGE+4] = 0x00;
+							extmas[OUT_PACKAGE+5] = 0x9F;
+							extmas[OUT_PACKAGE+6] = 3;
+							extmas[OUT_PACKAGE+7] = 3;
+							break;
+				case 'E':	UART1_Init(9600);
+							buf[0] = 1;
+							extmas[3] = 9;
+							Make_volkov_package(1, 1, 1);
+							break;
+				case 'R':	UART0_Init(9600);
+							buf[0] = 1;
+							Make_volkov_package(1, 3, 1);
+							break;
+				case 'T':	buf[0] = 2;
+							Make_volkov_package(1, 3, 1);
+							break;
+				case 'A':	extmas[TYPE_COM] = 3;
+							extmas[OUT_PACKAGE] = 0x0a;
+							extmas[OUT_PACKAGE+1] = 0xFF;
+							break;
+				case 'a':	extmas[TYPE_COM] = 3;
+							extmas[OUT_PACKAGE] = 0x00;
+							extmas[OUT_PACKAGE+1] = 0x00;
+							break;
+				case 'S':	extmas[TYPE_COM] = 2;
+							extmas[OUT_PACKAGE] = 0x02;
+							extmas[OUT_PACKAGE+1] = 0x58;
+							break;
+
+				default: printf("unknown command\n");
+			}
+		}
+	}
+}
+
+//-----------------------------------------------------------------------------
+// Initialization Subroutines
+//-----------------------------------------------------------------------------
+
+//-----------------------------------------------------------------------------
+// Sysclk_Init
+//-----------------------------------------------------------------------------
+//
+// Return Value : None
+// Parameters	: None
+//
+// Initialize the system clock and USB clock
+//
+//-----------------------------------------------------------------------------
+void Sysclk_Init(void)
+{
+
+#if defined C8051F340_H
+	OSCICN |= 0x03;						// Configure internal oscillator for
+										// its maximum frequency and enable
+										// missing clock detector
+	CLKMUL  = 0x00;						// Select internal oscillator as
+										// input to clock multiplier
+	CLKMUL |= 0x80;						// Enable clock multiplier
+	Delay();							// Delay for clock multiplier to begin
+	CLKMUL |= 0xC0;						// Initialize the clock multiplier
+	Delay();							// Delay for clock multiplier to begin
+	while(!(CLKMUL & 0x20));			// Wait for multiplier to lock
+	CLKSEL	= SYS_4X | USB_4X_CLOCK;	// Select system clock and USB clock
+#endif // C8051F340_H
+
+}
+
+//-----------------------------------------------------------------------------
+// PORT_Init
+//-----------------------------------------------------------------------------
+void Port_Init(void)
+{
+    // P0.0  -  SCK  (SPI0), Open-Drain, Digital
+    // P0.1  -  MISO (SPI0), Open-Drain, Digital
+    // P0.2  -  MOSI (SPI0), Open-Drain, Digital
+    // P0.3  -  NSS  (SPI0), Open-Drain, Digital
+    // P0.4  -  TX0 (UART0), Push-Pull,  Digital
+    // P0.5  -  RX0 (UART0), Open-Drain, Digital
+    // P0.6  -  Skipped,     Open-Drain, Digital
+    // P0.7  -  TX1 (UART1), Push-Pull,  Digital
+
+    // P1.0  -  RX1 (UART1), Open-Drain, Digital
+    // P1.1  -  Skipped,     Open-Drain, Digital
+    // P1.2  -  Skipped,     Open-Drain, Digital
+    // P1.3  -  Skipped,     Open-Drain, Digital
+    // P1.4  -  Skipped,     Open-Drain, Digital
+    // P1.5  -  Skipped,     Open-Drain, Digital
+    // P1.6  -  Skipped,     Open-Drain, Digital
+    // P1.7  -  Skipped,     Open-Drain, Digital
+
+    // P2.0  -  Skipped,     Open-Drain, Digital
+    // P2.1  -  Skipped,     Open-Drain, Digital
+    // P2.2  -  Skipped,     Open-Drain, Digital
+    // P2.3  -  Skipped,     Open-Drain, Digital
+    // P2.4  -  Skipped,     Open-Drain, Digital
+    // P2.5  -  Skipped,     Open-Drain, Digital
+    // P2.6  -  Skipped,     Open-Drain, Digital
+    // P2.7  -  Skipped,     Open-Drain, Digital
+
+    // P3.0  -  Skipped,     Open-Drain, Digital
+    // P3.1  -  Skipped,     Open-Drain, Digital
+    // P3.2  -  Skipped,     Open-Drain, Digital
+    // P3.3  -  Skipped,     Open-Drain, Digital
+    // P3.4  -  Skipped,     Open-Drain, Digital
+    // P3.5  -  Skipped,     Open-Drain, Digital
+    // P3.6  -  Skipped,     Open-Drain, Digital
+    // P3.7  -  Skipped,     Open-Drain, Digital
+    P0MDOUT   = 0x9D;
+    P1MDOUT   = 0xFE;
+	P3MDOUT   = 0xFF;
+	P4MDOUT   = 0xFF;
+    P0SKIP    = 0x48;
+    P1SKIP    = 0xFE;
+    P2SKIP    = 0xFF;
+    P3SKIP    = 0xFF;
+    XBR0      = 0x03;
+    XBR1      = 0x40;
+    XBR2      = 0x01;
+	P3 = 0xFF;
+	P4 = 0xFF;
+}
+
+//-----------------------------------------------------------------------------
+// Usb0_Init
+//-----------------------------------------------------------------------------
+//
+// Return Value : None
+// Parameters	: None
+// 
+// - Initialize USB0
+// - Enable USB0 interrupts
+// - Enable USB0 transceiver
+// - Enable USB0 with suspend detection
+//-----------------------------------------------------------------------------
+void Usb0_Init(void)
+{
+	POLL_WRITE_BYTE(POWER,	0x08);		// Force Asynchronous USB Reset
+										// USB Interrupt enable flags are reset by USB bus reset
+										// 
+	POLL_WRITE_BYTE(IN1IE,	0x01);		// Enable EP 0 interrupt, disable EP1-3 IN interrupt
+	POLL_WRITE_BYTE(OUT1IE,	0x00);		// Disable EP 1-3 OUT interrupts
+	POLL_WRITE_BYTE(CMIE,	0x05);		// Enable Reset and Suspend interrupts
+
+	USB0XCN = 0xE0;						// Enable transceiver; select full speed
+	POLL_WRITE_BYTE(CLKREC, 0x80);		// Enable clock recovery, single-step mode
+										// disabled
+										// Enable USB0 by clearing the USB 
+										// Inhibit bit
+	POLL_WRITE_BYTE(POWER,	0x01);		// and enable suspend detection
+}
+
+//-----------------------------------------------------------------------------
+// Delay
+//-----------------------------------------------------------------------------
+//
+// Used for a small pause, approximately 80 us in Full Speed,
+// and 1 ms when clock is configured for Low Speed
+//
+//-----------------------------------------------------------------------------
+
+void Delay(void)
+{
+	int x;
+	for(x = 0;x < 500;x)
+		x++;
+}
+
+//-----------------------------------------------------------------------------
+// End Of File
+//-----------------------------------------------------------------------------

@@ -1,0 +1,296 @@
+C51 COMPILER V9.50a   USB_DESCRIPTOR                                                       04/03/2023 15:54:12 PAGE 1   
+
+
+C51 COMPILER V9.50a, COMPILATION OF MODULE USB_DESCRIPTOR
+OBJECT MODULE PLACED IN USB_Descriptor.OBJ
+COMPILER INVOKED BY: C:\Keil\C51\BIN\C51.exe USB_Descriptor.c DB OE CD INCDIR(c:\SiLabs\MCU\Inc) COMPACT
+
+line level    source
+
+   1          //-----------------------------------------------------------------------------
+   2          // USB_Descriptor.c
+   3          //-----------------------------------------------------------------------------
+   4          // Copyright 2005 Silicon Laboratories, Inc.
+   5          // http://www.silabs.com
+   6          //
+   7          // Program Description:
+   8          //
+   9          // Source file for USB firmware. Includes descriptor data.
+  10          //
+  11          //
+  12          // How To Test:         See Readme.txt
+  13          //
+  14          //
+  15          // FID:                         32X000021
+  16          // Target:                      C8051F32x
+  17          // Tool chain:          Keil C51 7.50 / Keil EVAL C51
+  18          //                                      Silicon Laboratories IDE version 2.6
+  19          // Command Line:        See Readme.txt
+  20          // Project Name:        F32x_USB_Interrupt
+  21          //
+  22          //
+  23          // Release 1.3
+  24          //        -All changes by GP
+  25          //        -22 NOV 2005
+  26          //        -Changed revision number to match project revision
+  27          //              No content changes to this file
+  28          //        -Modified file to fit new formatting guidelines
+  29          //        -Changed file name from USB_DESCRIPTOR.c
+  30          //
+  31          // Release 1.0
+  32          //        -Initial Revision (DM)
+  33          //        -22 NOV 2002
+  34          //
+  35          
+  36          //-----------------------------------------------------------------------------
+  37          // Includes
+  38          //-----------------------------------------------------------------------------
+  39          
+  40          #include "USB_CDC_Type.h"
+  41          #include "USB_Descriptor.h"
+  42          
+  43          //-----------------------------------------------------------------------------
+  44          // Macro for two byte field
+  45          //-----------------------------------------------------------------------------
+  46          
+  47          #if defined BIG_ENDIAN
+  48          #define LE(x)   ((((x)&0x00FF)<<8)|(((x)&0xFF00)>>8))   // convert to little endian
+  49          #else
+              #define LE(x)   (x)                                                                             // no conversion
+              #endif
+  52          
+  53          //-----------------------------------------------------------------------------
+  54          // Descriptor Declarations
+  55          //-----------------------------------------------------------------------------
+C51 COMPILER V9.50a   USB_DESCRIPTOR                                                       04/03/2023 15:54:12 PAGE 2   
+
+  56          
+  57          // Device descriptor
+  58          Tdevice_descriptor code DeviceDesc =
+  59          {
+  60                  sizeof(Tdevice_descriptor),     // bLength
+  61                  DSC_TYPE_DEVICE,        // bDescriptorType
+  62                  LE( VER_USB ),          // bcdUSB
+  63                  0x02,                           // bDeviceClass (Communication Class)
+  64                  0x00,                           // bDeviceSubClass
+  65                  0x00,                           // bDeviceProtocol
+  66                  EP0_PACKET_SIZE,        // bMaxPacketSize0
+  67                  LE( VID ),                      // idVendor
+  68                  LE( PID ),                      // idProduct
+  69                  LE( DEV_REV ),          // bcdDevice
+  70                  0x01,                           // iManufacturer
+  71                  0x02,                           // iProduct
+  72                  0x03,                           // iSerialNumber
+  73                  0x01                            // bNumConfigurations
+  74          }; //end of DeviceDesc
+  75          
+  76          // Configuration
+  77          Tconfiguration_desc_set code ConfigDescSet =
+  78          {
+  79            {                                     // Configuration descriptor
+  80                  sizeof(Tconfiguration_descriptor),      // bLength
+  81                  DSC_TYPE_CONFIG,        // bDescriptorType
+  82                  LE( sizeof(Tconfiguration_desc_set) ),// bTotalLength
+  83                  DSC_NUM_INTERFACE,      // bNumInterfaces
+  84                  0x01,                           // bConfigurationValue
+  85                  0x00,                           // iConfiguration
+  86                  0x80,                           // bmAttributes
+  87                  0x0F                            // bMaxPower
+  88            },
+  89            {                                     // Interface(0) - Communication Class
+  90                  sizeof(Tinterface_descriptor),  // bLength
+  91                  DSC_TYPE_INTERFACE,     // bDescriptorType
+  92                  0x00,                           // bInterfaceNumber
+  93                  0x00,                           // bAlternateSetting
+  94                  0x01,                           // bNumEndpoints
+  95                  0x02,                           // bInterfaceClass (Communication Class)
+  96                  0x02,                           // bInterfaceSubClass (Abstract Control Model)
+  97                  0x01,                           // bInterfaceProcotol (V.25ter, Common AT commands)
+  98                  0x00                            // iInterface
+  99            },
+ 100            {                                     // Header Functional Descriptor
+ 101                  sizeof(Theader_func_descriptor),        // bLength
+ 102                  DSC_TYPE_CS_INTERFACE,          // bDescriptorType (CS_INTERFACE)
+ 103                  DSC_SUBTYPE_CS_HEADER_FUNC,     // bDescriptorSubtype (Header Functional)
+ 104                  LE(0x0110)                                      // bcdCDC (CDC spec release number, 1.1)
+ 105            },
+ 106            {                                     // Call Management Functional Descriptor
+ 107                  sizeof(Tcall_man_func_descriptor),      // bLength
+ 108                  DSC_TYPE_CS_INTERFACE,          // bDescriptorType (CS_INTERFACE)
+ 109                  DSC_SUBTYPE_CS_CALL_MAN,        // bDescriptorSubtype (Call Management)
+ 110                  0x01,                                           // bmCapabilities (only over Communication Class IF / handles itself)
+ 111                  0x01                                            // bDataInterface (Interface number of Data Class interface)
+ 112            },
+ 113            {                                     // Abstract Control Management Functional Descriptor
+ 114                  sizeof(Tabst_control_mana_descriptor),  // bLength
+ 115                  DSC_TYPE_CS_INTERFACE,          // bDescriptorType (CS_INTERFACE)
+ 116                  DSC_SUBTYPE_CS_ABST_CNTRL,      // bDescriptorSubtype (Abstract Control Management)
+ 117                  0x06                                            // bmCapabilities (Supports Send_Break, Set_Line_Coding, Set_Control_Line_State,
+C51 COMPILER V9.50a   USB_DESCRIPTOR                                                       04/03/2023 15:54:12 PAGE 3   
+
+ 118                                                                          //                                      Get_Line_Coding, and the notification Serial_State)
+ 119            },
+ 120            {                                     // Union Functional Descriptor
+ 121                  sizeof(Tunion_func_descriptor), // bLength
+ 122                  DSC_TYPE_CS_INTERFACE,          // bDescriptorType (CS_INTERFACE)
+ 123                  DSC_SUBTYPE_CS_UNION_FUNC,      // bDescriptorSubtype (Union Functional)
+ 124                  0x00,                                           // bMasterInterface (Interface number master interface in the union)
+ 125                  0x01                                            // bSlaveInterface0 (Interface number slave interface in the union)
+ 126            },
+ 127            {                                     // Endpoint1
+ 128                  sizeof(Tendpoint_descriptor),   // bLength
+ 129                  DSC_TYPE_ENDPOINT,      // bDescriptorType
+ 130                  IN_EP1,                         // bEndpointAddress
+ 131                  DSC_EP_INTERRUPT,       // bmAttributes
+ 132                  LE( EP1_PACKET_SIZE ),  // MaxPacketSize
+ 133                  1                                       // bInterval
+ 134            },
+ 135            {                                     // Interface(1) - Data Interface Class
+ 136                  sizeof(Tinterface_descriptor),  // bLength
+ 137                  DSC_TYPE_INTERFACE, // bDescriptorType
+ 138                  0x01,                           // bInterfaceNumber
+ 139                  0x00,                           // bAlternateSetting
+ 140                  0x02,                           // bNumEndpoints
+ 141                  0x0A,                           // bInterfaceClass (Data Interface Class)
+ 142                  0x00,                           // bInterfaceSubClass
+ 143                  0x00,                           // bInterfaceProcotol (No class specific protocol required)
+ 144                  0x00                            // iInterface
+ 145            },
+ 146            {                                     // Endpoint IN 2 descriptor
+ 147                  sizeof(Tendpoint_descriptor),   // bLength
+ 148                  DSC_TYPE_ENDPOINT,      // bDescriptorType
+ 149                  IN_EP2,                         // bEndpointAddress
+ 150                  DSC_EP_BULK,            // bmAttributes
+ 151                  LE( EP2_PACKET_SIZE ), // MaxPacketSize
+ 152                  0                                       // bInterval
+ 153            },
+ 154            {                                     // Endpoint OUT 2 descriptor
+ 155                  sizeof(Tendpoint_descriptor),   // bLength
+ 156                  DSC_TYPE_ENDPOINT,      // bDescriptorType
+ 157                  OUT_EP2,                        // bEndpointAddress
+ 158                  DSC_EP_BULK,            // bmAttributes
+ 159                  LE( EP2_PACKET_SIZE ), // MaxPacketSize
+ 160                  0                                       // bInterval
+ 161            }
+ 162          }; //end of Configuration
+ 163          
+ 164          #define STR0LEN 4
+ 165          
+ 166          BYTE code String0Desc[STR0LEN] =
+ 167          {
+ 168                  STR0LEN, DSC_TYPE_STRING, 0x09, 0x04
+ 169          }; //end of String0Desc
+ 170          
+ 171          #define STR1LEN sizeof("SILICON LABORATORIES INC.")*2
+ 172          
+ 173          BYTE code String1Desc[STR1LEN] =
+ 174          {
+ 175                  STR1LEN, DSC_TYPE_STRING,
+ 176                  'S', 0,
+ 177                  'I', 0,
+ 178                  'L', 0,
+ 179                  'I', 0,
+C51 COMPILER V9.50a   USB_DESCRIPTOR                                                       04/03/2023 15:54:12 PAGE 4   
+
+ 180                  'C', 0,
+ 181                  'O', 0,
+ 182                  'N', 0,
+ 183                  ' ', 0,
+ 184                  'L', 0,
+ 185                  'A', 0,
+ 186                  'B', 0,
+ 187                  'O', 0,
+ 188                  'R', 0,
+ 189                  'A', 0,
+ 190                  'T', 0,
+ 191                  'O', 0,
+ 192                  'R', 0,
+ 193                  'I', 0,
+ 194                  'E', 0,
+ 195                  'S', 0,
+ 196                  ' ', 0,
+ 197                  'I', 0,
+ 198                  'N', 0,
+ 199                  'C', 0,
+ 200                  '.', 0
+ 201          }; //end of String1Desc
+ 202          
+ 203          #define STR2LEN sizeof("C8051F320 Development Board")*2
+ 204          
+ 205          BYTE code String2Desc[STR2LEN] =
+ 206          {
+ 207                  STR2LEN, DSC_TYPE_STRING,
+ 208                  'C', 0,
+ 209                  '8', 0,
+ 210                  '0', 0,
+ 211                  '5', 0,
+ 212                  '1', 0,
+ 213                  'F', 0,
+ 214                  '3', 0,
+ 215                  '2', 0,
+ 216                  '0', 0,
+ 217                  ' ', 0,
+ 218                  'D', 0,
+ 219                  'e', 0,
+ 220                  'v', 0,
+ 221                  'e', 0,
+ 222                  'l', 0,
+ 223                  'o', 0,
+ 224                  'p', 0,
+ 225                  'm', 0,
+ 226                  'e', 0,
+ 227                  'n', 0,
+ 228                  't', 0,
+ 229                  ' ', 0,
+ 230                  'B', 0,
+ 231                  'o', 0,
+ 232                  'a', 0,
+ 233                  'r', 0,
+ 234                  'd', 0
+ 235          }; //end of String2Desc
+ 236          
+ 237          // serial number string
+ 238          
+ 239          #define STR3LEN sizeof("0001")*2
+ 240          
+ 241          BYTE code String3Desc[STR3LEN] =
+C51 COMPILER V9.50a   USB_DESCRIPTOR                                                       04/03/2023 15:54:12 PAGE 5   
+
+ 242          {
+ 243                  STR3LEN, DSC_TYPE_STRING,
+ 244                  '0', 0,
+ 245                  '0', 0,
+ 246                  '0', 0,
+ 247                  '1', 0
+ 248          }; //end of String3Desc
+ 249          
+ 250          BYTE code * code StringDescTable[ DSC_NUM_STRING ] =
+ 251          {
+ 252                  String0Desc,
+ 253                  String1Desc,
+ 254                  String2Desc,
+ 255                  String3Desc
+ 256          };
+ 257          
+ 258          //-----------------------------------------------------------------------------
+ 259          // End Of File
+ 260          //-----------------------------------------------------------------------------
+C51 COMPILER V9.50a   USB_DESCRIPTOR                                                       04/03/2023 15:54:12 PAGE 6   
+
+ASSEMBLY LISTING OF GENERATED OBJECT CODE
+
+
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =   ----    ----
+   CONSTANT SIZE    =    215    ----
+   XDATA SIZE       =   ----    ----
+   PDATA SIZE       =   ----    ----
+   DATA SIZE        =   ----    ----
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =   ----    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

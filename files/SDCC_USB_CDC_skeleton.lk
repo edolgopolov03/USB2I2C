@@ -1,0 +1,25 @@
+-muwx
+-i D:\!!Work!!\2021_01_26_CAT\485\USB_CDC_485\SDCC_USB_CDC_skeleton.hex
+-M
+-Y
+-y
+-b HOME = 0x0000
+-b XSEG = 0x0001
+-b PSEG = 0x0001
+-b ISEG = 0x0000
+-b BSEG = 0x0000
+-k c:\Program Files\SDCC\BIN\..\lib\small
+-l D:\!!Work!!\2021_01_26_CAT\485\USB_CDC_485\SDCC_FIFO_RW.lib
+-l mcs51
+-l libsdcc
+-l libint
+-l liblong
+-l libfloat
+D:\!!Work!!\2021_01_26_CAT\485\USB_CDC_485\USB_Main.rel
+D:\!!Work!!\2021_01_26_CAT\485\USB_CDC_485\USB_ISR.rel
+D:\!!Work!!\2021_01_26_CAT\485\USB_CDC_485\USB_Standard_Requests.rel
+D:\!!Work!!\2021_01_26_CAT\485\USB_CDC_485\USB_Descriptor.rel
+D:\!!Work!!\2021_01_26_CAT\485\USB_CDC_485\USB_Class_Requests.rel
+D:\!!Work!!\2021_01_26_CAT\485\USB_CDC_485\USB_CDC_UART.rel
+
+-e
