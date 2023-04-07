@@ -1,0 +1,76 @@
+; Copyright (C) 1999-2003 DeVaSys. All rights reserved.
+;
+; This file is provided "as is" without warranty of any kind,
+; either expressed or implied.
+;
+; Please read the license agreement for more information.
+;
+;
+[Version]
+Signature="$CHICAGO$"
+DriverVer=05/20/2003,3.00.0000.0
+Provider=%Provider%
+Class=DeVaSysUsbInterfaces
+ClassGuid={D7345EB6-522F-4f60-A3D1-01112B2D3845}
+
+[ClassInstall] 
+AddReg=ClassAddReg
+
+[ClassInstall32] 
+AddReg=ClassAddReg
+
+[ClassAddReg]
+HKR,,,,"%ClassName%"
+HKR,,Icon,,-20
+
+[Manufacturer]
+%Manufacturer%=Models
+
+[DestinationDirs]
+DefaultDestDir=10,System32\Drivers
+Install.CopyDllFiles=10,System32
+
+[SourceDisksNames]
+1=%SourceDisk%,,,.
+
+[SourceDisksFiles]
+dev03edb.sys=1
+usbi2cio.dll=1
+
+[Models]
+%DeviceDesc%=Install,USB\VID_0ABF&PID_03ED
+
+[Install]
+CopyFiles=Install.CopyFiles, Install.CopyDllFiles
+AddReg=Install.AddReg
+
+[Install.CopyFiles]
+dev03edb.sys,,,2
+
+[Install.CopyDllFiles]
+usbi2cio.dll,,,2
+
+[Install.AddReg]
+HKR,,DevLoader,,*ntkern
+HKR,,NTMPDriver,,dev03edb.sys
+
+[Install.NT]
+CopyFiles=Install.CopyFiles, Install.CopyDllFiles
+
+[Install.NT.Services]
+AddService=dev03edb,2,Install.NT.AddService
+
+[Install.NT.AddService]
+DisplayName=%SvcDesc%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%10%\system32\drivers\dev03edb.sys
+
+[Strings]
+ClassName="DeVaSys USB Interfaces"
+Provider="DeVaSys "
+Manufacturer="DeVaSys"
+SourceDisk="USB-I2C/IO Installation Disk"
+DeviceDesc="USB-I2C/IO Board"
+SvcDesc="USB-I2C/IO Driver (dev03edb.sys)"
